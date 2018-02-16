@@ -4,12 +4,11 @@ TODO: as component
 """
 import logging
 
-REQUIREMENTS = [
+DEPENDENCIES = [
     'pyblnet' # for obvious reasons
     ] 
 
 import voluptuous as vol
-from pyblnet import BLNET, test_blnet
 import asyncio
 from homeassistant.helpers.discovery import load_platform
 
@@ -43,6 +42,9 @@ CONFIG_SCHEMA = vol.Schema({
 
 def setup(hass, config):
     """Set up the BLNET component"""
+
+    from pyblnet import BLNET, test_blnet
+
     config = config[DOMAIN]
     resource = config.get(CONF_RESOURCE)
     password = config.get(CONF_PASSWORD)

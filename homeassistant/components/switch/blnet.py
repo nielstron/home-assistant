@@ -5,7 +5,6 @@ TODO: as component
 import logging
 
 import voluptuous as vol
-from pyblnet import BLNET, test_blnet
 import asyncio
 
 from homeassistant.const import (
