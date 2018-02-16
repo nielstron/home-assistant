@@ -4,6 +4,10 @@ TODO: as component
 """
 import logging
 
+REQUIREMENTS = [
+    'pyblnet' # for obvious reasons
+    ] 
+
 import voluptuous as vol
 from pyblnet import BLNET, test_blnet
 import asyncio
