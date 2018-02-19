@@ -4,7 +4,7 @@ TODO: as component
 """
 import logging
 
-DEPENDENCIES = [
+REQUIREMENTS = [
     'pyblnet' # for obvious reasons
     ] 
 
