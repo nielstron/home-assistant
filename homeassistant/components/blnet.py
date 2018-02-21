@@ -5,7 +5,7 @@ TODO: as component
 import logging
 
 REQUIREMENTS = [
-    'pyblnet' # for obvious reasons
+    'pyblnet>=0.2'
     ] 
 
 import voluptuous as vol
