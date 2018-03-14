@@ -71,7 +71,7 @@ class FroniusSensor(Entity):
         self.rest = rest
         self._name = name
         self._attributes = []
-        self._state = STATE_UNKNOWN
+        self._state = None
         self.update()
 
     @property
@@ -88,11 +88,6 @@ class FroniusSensor(Entity):
         """Get the latest data from Fronius Symo and update the state."""
         self.rest.update()
         value = self.rest.data
-
-        if value is None:
-            value = STATE_UNKNOWN
-
-        self._state = value
 
         # Parse the return text as JSON and save the json as an attribute.
         try:

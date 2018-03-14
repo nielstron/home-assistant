@@ -91,8 +91,6 @@ class FroniusSymoSolar(Entity):
         if value is None:
             value = STATE_UNKNOWN
 
-        self._state = value
-
         # Parse the return text as JSON and save the json as an attribute.
         try:
             json_dict = json.loads(value)
