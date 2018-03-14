@@ -24,7 +24,7 @@ DOMAIN = 'blnet'
 CONF_NODE = 'can_node'
 # means don't change current setting 
 # for example if there is only one UVR1611 connected
-DEFAULT_NODE = -1 
+DEFAULT_NODE = 10000
 # scan every 6 minutes per default
 DEFAULT_SCAN_INTERVAL = 360
 
