@@ -5,16 +5,14 @@ TODO: as component
 import logging
 
 REQUIREMENTS = [
-    'pyblnet==0.2'
+    'pyblnet==0.3'
     ] 
 
 import voluptuous as vol
-import asyncio
 from homeassistant.helpers.discovery import load_platform
 
 from homeassistant.const import (
     CONF_RESOURCE, STATE_UNKNOWN, CONF_PASSWORD, CONF_SCAN_INTERVAL)
-from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import async_track_time_interval
 from datetime import timedelta
 import homeassistant.helpers.config_validation as cv
