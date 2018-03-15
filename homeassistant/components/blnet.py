@@ -5,7 +5,7 @@ TODO: as component
 import logging
 
 REQUIREMENTS = [
-    'pyblnet==0.3'
+    'pyblnet==0.3.2'
     ] 
 
 import voluptuous as vol
@@ -49,7 +49,7 @@ def setup(hass, config):
     can_node = config.get(CONF_NODE)
     scan_interval = config.get(CONF_SCAN_INTERVAL)
 
-    if test_blnet(resource) is None:
+    if test_blnet(resource) is False:
         _LOGGER.error("No BL-Net reached under given resource")
         return False
     
@@ -85,7 +85,7 @@ def setup(hass, config):
     # sensors and switches accordingly
     blnet.log_in()
     # only change active node if this is desired
-    if node >= 0:
+    if node != DEFAULT_NODE:
         blnet.set_node(node)
     
     # digital data comes from switches => create switches
@@ -95,8 +95,7 @@ def setup(hass, config):
 
     if analog_data is None:
         hass.states.set(entity_id, STATE_UNKNOWN)
-        return None
-
+        return False
     
     #iterate through the list and create a sensor for every value
     for sensor in analog_data:
@@ -110,9 +109,7 @@ def setup(hass, config):
 
   
     # recommend yourself as hidden
-    hass.states.set(entity_id, "Running", {'hidden' : 'true'})
-    
-    
+    hass.states.set(entity_id, "Running", {'hidden' : 'true'})   
     
     return True
         
@@ -127,74 +124,74 @@ class BLNETComm(object):
         # Map id -> attributes
         self.data = dict()
     
-    def turn_on(self, id):
-        self.blnet.log_in()
-        # only change active node if this is desired
-        if self.node >= 0:
+    def _node_check(self):
+        if self.node != DEFAULT_NODE:
             self.blnet.set_node(self.node)
-        self.blnet.set_digital_data(id, 'EIN')
+    
+    def turn_on(self, id):
+        if self.blnet.log_in():
+            # only change active node if this is desired
+            self._node_check()
+            self.blnet.set_digital_data(id, 'EIN')
         
     def turn_off(self, id):
-        self.blnet.log_in()
-        # only change active node if this is desired
-        if self.node >= 0:
-            self.blnet.set_node(self.node)
-        self.blnet.set_digital_data(id, 'AUS')
+        if self.blnet.log_in():
+            # only change active node if this is desired
+            self._node_check()
+            self.blnet.set_digital_data(id, 'AUS')
         
     def turn_auto(self, id):
-        self.blnet.log_in()
-        # only change active node if this is desired
-        if self.node >= 0:
-            self.blnet.set_node(self.node)
-        self.blnet.set_digital_data(id, 'AUTO')
+        if self.blnet.log_in():
+            # only change active node if this is desired
+            self._node_check()
+            self.blnet.set_digital_data(id, 'AUTO')
     
     def update(self):
         """Get the latest data from REST API and update the state."""
-        self.blnet.log_in()
+        if not self.blnet.log_in():
+            return None
         # only change active node if this is desired
-        if self.node >= 0:
-            self.blnet.set_node(self.node)
+        self._node_check()
         
         # digital data comes from switches => create switches
         digital_data = self.blnet.read_digital_values()
         # analog data comes from sensors => create sensors
         analog_data = self.blnet.read_analog_values()
 
-        if analog_data is None:
-            return None
-        
-        #iterate through the list and create a sensor for every value
-
-        for sensor in analog_data:
-            attributes = dict()
-            entity_id = DOMAIN + '_analog_' + sensor['id']
-            attributes['value'] = sensor['value']
-            
-            attributes.setdefault('unit_of_measurement', sensor['unit_of_measurement'])
-            attributes.setdefault('friendly_name', sensor['name'])
-            attributes.setdefault('icon', 'mdi:thermometer')
-            
-            self.data[entity_id] = attributes
-        
-                #iterate through the list and create a sensor for every value
-        for sensor in digital_data:
-            attributes = dict()
-            entity_id = DOMAIN + '_digital_' + sensor['id']
-
-            attributes.setdefault('friendly_name', sensor['name'])
-            attributes['mode'] = sensor['mode']
-            attributes['value'] = sensor['value']
-            # Change the symbol according to current mode and setting
-            # Automated switch => gear symbol
-            if sensor['mode'] == 'AUTO':
-                attributes['icon'] = 'mdi:settings'
-            # Nonautomated switch, toggled on => switch on
-            elif value == 'EIN':
-                attributes['icon'] = 'mdi:toggle-switch'
-            # Nonautomated switch, toggled off => switch off
-            else:
-                attributes['icon'] =  'mdi:toggle-switch-off'
+        if not analog_data is None :
+            #iterate through the list and create a sensor for every value
+            for sensor in analog_data:
+                attributes = dict()
+                entity_id = DOMAIN + '_analog_' + sensor['id']
+                attributes['value'] = sensor['value']
                 
-            
-            self.data[entity_id] = attributes
+                attributes.setdefault('unit_of_measurement',
+                                      sensor['unit_of_measurement'])
+                attributes.setdefault('friendly_name', sensor['name'])
+                attributes.setdefault('icon', 'mdi:thermometer')
+                
+                self.data[entity_id] = attributes
+        
+        if not digital_data is None:
+            #iterate through the list and create a sensor for every value
+            for sensor in digital_data:
+                attributes = dict()
+                entity_id = DOMAIN + '_digital_' + sensor['id']
+    
+                attributes.setdefault('friendly_name', sensor['name'])
+                attributes['mode'] = sensor['mode']
+                attributes['value'] = sensor['value']
+                # Change the symbol according to current mode and setting
+                # Automated switch => gear symbol
+                if sensor['mode'] == 'AUTO':
+                    attributes['icon'] = 'mdi:settings'
+                # Nonautomated switch, toggled on => switch on
+                elif value == 'EIN':
+                    attributes['icon'] = 'mdi:toggle-switch'
+                # Nonautomated switch, toggled off => switch off
+                else:
+                    attributes['icon'] =  'mdi:toggle-switch-off'
+                    
+                
+                self.data[entity_id] = attributes
 
