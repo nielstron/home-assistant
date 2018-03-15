@@ -30,6 +30,7 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     comm = hass.data[DOMAIN + '_data']
 
     add_devices([BLNETComponent(hass, id, blnet_id, comm)], True)
+    return True
 
 
 class BLNETComponent(Entity):
