@@ -55,18 +55,6 @@ def setup(hass, config):
     
     # Initialize the BL-NET sensor
     blnet = BLNET(resource, password)
-    # init the devices entitiy name starting without number
-    # and increasing if other entitys are already present
-    base_name = 'UVR 1611'
-    name_ext = ''
-    base_id = DOMAIN + '.' + 'uvr_1611'
-    i = 1
-    entity_id = base_id
-    while hass.states.get(entity_id) is not None:
-        i += 1
-        entity_id = base_id + '_' + str(i)
-        name_ext = ' ' + str(i)
-    _attributes = {}
      # Can-Bus node
     node = can_node
     
@@ -126,7 +114,8 @@ class BLNETComm(object):
     
     def _node_check(self):
         if self.node != DEFAULT_NODE:
-            self.blnet.set_node(self.node)
+            return self.blnet.set_node(self.node)
+        return True
     
     def turn_on(self, id):
         if self.blnet.log_in():
