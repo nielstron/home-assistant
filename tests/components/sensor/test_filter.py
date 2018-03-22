@@ -4,7 +4,8 @@ import unittest
 from unittest.mock import patch
 
 from homeassistant.components.sensor.filter import (
-    LowPassFilter, OutlierFilter, ThrottleFilter, TimeSMAFilter, BandPassFilter)
+    LowPassFilter, OutlierFilter, ThrottleFilter, TimeSMAFilter,
+    BandPassFilter)
 import homeassistant.util.dt as dt_util
 from homeassistant.setup import setup_component
 from tests.common import get_test_home_assistant, assert_setup_component
@@ -87,8 +88,8 @@ class TestFilterSensor(unittest.TestCase):
         lower = 10
         upper = 20
         filt = BandPassFilter(entity=None,
-                             lower_bound=lower,
-                             upper_bound=upper)
+                              lower_bound=lower,
+                              upper_bound=upper)
         for state in self.values:
             filtered = filt.filter_state(state)
             if state < lower:
