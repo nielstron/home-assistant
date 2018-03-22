@@ -248,6 +248,7 @@ class Filter(object):
             filtered = round(float(filtered), self.precision)
         return filtered
 
+
 class HistoricalFilter(Filter):
     """Filter skeleton for a filter that acts based on historical data.
 
@@ -262,7 +263,7 @@ class HistoricalFilter(Filter):
         """Initialize common attributes."""
         super().__init__(FILTER_NAME_OUTLIER, precision, entity)
         self.states = deque(maxlen=window_size)
-    
+
     def filter_state(self, new_state):
         """Implement a common interface for filters."""
         filtered = self._filter_state(new_state)
