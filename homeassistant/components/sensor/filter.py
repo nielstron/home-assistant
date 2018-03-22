@@ -21,6 +21,7 @@ import homeassistant.helpers.config_validation as cv
 from homeassistant.util.decorator import Registry
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import async_track_state_change
+import homeassistant.util.dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -215,15 +216,12 @@ class Filter(object):
     """Filter skeleton.
 
     Args:
-        window_size (int): size of the sliding window that holds previous
-                                values
         precision (int): round filtered value to precision value
         entity (string): used for debugging only
     """
 
-    def __init__(self, name, window_size=1, precision=None, entity=None):
+    def __init__(self, name, precision=None, entity=None):
         """Initialize common attributes."""
-        self.states = deque(maxlen=window_size)
         self.precision = precision
         self._name = name
         self._entity = entity
@@ -248,7 +246,30 @@ class Filter(object):
         filtered = self._filter_state(new_state)
         if isinstance(filtered, Number):
             filtered = round(float(filtered), self.precision)
-        self.states.append(filtered)
+        return filtered
+
+class HistoricalFilter(Filter):
+    """Filter skeleton for a filter that acts based on historical data.
+
+    Args:
+        window_size (int): size of the sliding window that holds previous
+                                values
+        precision (int): round filtered value to precision value
+        entity (string): used for debugging only
+    """
+
+    def __init__(self, name, precision=None, entity=None, window_size=1):
+        """Initialize common attributes."""
+        super().__init__(FILTER_NAME_OUTLIER, precision, entity)
+        self.states = deque(maxlen=window_size)
+    
+    def filter_state(self, new_state):
+        """Implement a common interface for filters."""
+        filtered = self._filter_state(new_state)
+        # Don't act on pre-filtered data
+        self.states.append(new_state)
+        if isinstance(filtered, Number):
+            filtered = round(float(filtered), self.precision)
         return filtered
 
 
@@ -264,10 +285,10 @@ class BandPassFilter(Filter):
         lower_bound (float): band lower bound
     """
 
-    def __init__(self, window_size, precision, entity,
+    def __init__(self, precision, entity,
                  lower_bound=math.inf, upper_bound=-math.inf):
         """Initialize Filter."""
-        super().__init__(FILTER_NAME_OUTLIER, window_size, precision, entity)
+        super().__init__(FILTER_NAME_OUTLIER, precision, entity)
         self._lower_bound = lower_bound
         self._upper_bound = upper_bound
         self._stats_internal = Counter()
@@ -298,7 +319,7 @@ class BandPassFilter(Filter):
 
 
 @FILTERS.register(FILTER_NAME_OUTLIER)
-class OutlierFilter(Filter):
+class OutlierFilter(HistoricalFilter):
     """BASIC outlier filter.
 
     Determines if new state is in a band around the median.
@@ -331,7 +352,7 @@ class OutlierFilter(Filter):
 
 
 @FILTERS.register(FILTER_NAME_LOWPASS)
-class LowPassFilter(Filter):
+class LowPassFilter(HistoricalFilter):
     """BASIC Low Pass Filter.
 
     Args:
@@ -358,7 +379,7 @@ class LowPassFilter(Filter):
 
 
 @FILTERS.register(FILTER_NAME_TIME_SMA)
-class TimeSMAFilter(Filter):
+class TimeSMAFilter(HistoricalFilter):
     """Simple Moving Average (SMA) Filter.
 
     The window_size is determined by time, and SMA is time weighted.
@@ -401,7 +422,7 @@ class TimeSMAFilter(Filter):
 
 
 @FILTERS.register(FILTER_NAME_THROTTLE)
-class ThrottleFilter(Filter):
+class ThrottleFilter(HistoricalFilter):
     """Throttle Filter.
 
     One sample per window.
