@@ -33,7 +33,8 @@ CONFIG_SCHEMA = vol.Schema({
         vol.Required(CONF_RESOURCE): cv.url,
         vol.Optional(CONF_PASSWORD): cv.string,
         vol.Optional(CONF_NODE, default=DEFAULT_NODE): cv.positive_int,
-        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): cv.positive_int
+        vol.Optional(CONF_SCAN_INTERVAL,
+                     default=DEFAULT_SCAN_INTERVAL): cv.positive_int
         })
 }, extra=vol.ALLOW_EXTRA)
 
@@ -50,12 +51,12 @@ def setup(hass, config):
     scan_interval = config.get(CONF_SCAN_INTERVAL)
 
     if test_blnet(resource) is False:
-        _LOGGER.error("No BL-Net reached under given resource")
+        _LOGGER.error("No BL-Net reached at %", resource)
         return False
     
     # Initialize the BL-NET sensor
     blnet = BLNET(resource, password)
-     # Can-Bus node
+    # Can-Bus node
     node = can_node
     
     # set the communication entity
@@ -80,10 +81,6 @@ def setup(hass, config):
     digital_data = blnet.read_digital_values()
     # analog data comes from sensors => create sensors
     analog_data = blnet.read_analog_values()
-
-    if analog_data is None:
-        hass.states.set(entity_id, STATE_UNKNOWN)
-        return False
     
     #iterate through the list and create a sensor for every value
     for sensor in analog_data:
@@ -97,7 +94,7 @@ def setup(hass, config):
 
   
     # recommend yourself as hidden
-    hass.states.set(entity_id, "Running", {'hidden' : 'true'})   
+    #hass.states.set(entity_id, "Running", {'hidden' : 'true'})   
     
     return True
         
@@ -175,7 +172,7 @@ class BLNETComm(object):
                 if sensor['mode'] == 'AUTO':
                     attributes['icon'] = 'mdi:settings'
                 # Nonautomated switch, toggled on => switch on
-                elif value == 'EIN':
+                elif sensor['mode'] == 'EIN':
                     attributes['icon'] = 'mdi:toggle-switch'
                 # Nonautomated switch, toggled off => switch off
                 else:
