@@ -14,7 +14,7 @@ from datetime import timedelta
 import homeassistant.helpers.config_validation as cv
 
 REQUIREMENTS = [
-    'pyblnet==0.4'
+    'pyblnet==0.4.1'
     ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -121,19 +121,19 @@ class BLNETComm(object):
         if self.blnet.log_in():
             # only change active node if this is desired
             self._node_check()
-            self.blnet.set_digital_data(switch_id, 'EIN')
+            self.blnet.set_digital_value(switch_id, 'EIN')
 
     def turn_off(self, switch_id):
         if self.blnet.log_in():
             # only change active node if this is desired
             self._node_check()
-            self.blnet.set_digital_data(switch_id, 'AUS')
+            self.blnet.set_digital_value(switch_id, 'AUS')
 
     def turn_auto(self, switch_id):
         if self.blnet.log_in():
             # only change active node if this is desired
             self._node_check()
-            self.blnet.set_digital_data(switch_id, 'AUTO')
+            self.blnet.set_digital_value(switch_id, 'AUTO')
 
     def update(self):
         """Get the latest data from REST API and update the state."""
