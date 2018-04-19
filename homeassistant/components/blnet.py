@@ -187,5 +187,5 @@ class BLNETComm(object):
                     attributes['icon'] = 'mdi:toggle-switch-off'
 
                 self.data[entity_id] = attributes
-        
+
         self._last_updated = datetime.now()

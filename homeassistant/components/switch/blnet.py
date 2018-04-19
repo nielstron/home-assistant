@@ -57,8 +57,8 @@ class BLNETSwitch(SwitchDevice):
             last_blnet_update = self.communication.last_updated()
             if last_blnet_update == self._last_updated:
                 return
-        
-        sensor_data = self.communication.data.get(self._blnet_id)    
+
+        sensor_data = self.communication.data.get(self._blnet_id)
 
         if sensor_data is None:
             return
@@ -71,7 +71,7 @@ class BLNETSwitch(SwitchDevice):
             self._state = 'off'
         self._icon = sensor_data.get('icon')
         self._mode = sensor_data.get('mode')
-        
+
         self._last_updated = last_blnet_update
         self._assumed_state = False
 
@@ -115,7 +115,7 @@ class BLNETSwitch(SwitchDevice):
         self.communication.turn_off(self._id)
         self._state = 'off'
         self._assumed_state = True
-    
+
     @property
     def assumed_state(self)->bool:
         return self._assumed_state
