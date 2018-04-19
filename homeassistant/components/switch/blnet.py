@@ -45,12 +45,20 @@ class BLNETSwitch(SwitchDevice):
         self._friendly_name = blnet_id
         self._state = False
         self._state = None
+        self._assumed_state = True
         self._icon = None
         self._mode = STATE_UNKNOWN
+        self._last_updated = None
 
     def update(self):
         """Get the latest data from communication device """
-        sensor_data = self.communication.data.get(self._blnet_id)
+        # check if new data has arrived
+        if self._last_updated is not None:
+            last_blnet_update = self.communication.last_updated()
+            if last_blnet_update == self._last_updated:
+                return
+        
+        sensor_data = self.communication.data.get(self._blnet_id)    
 
         if sensor_data is None:
             return
@@ -63,6 +71,9 @@ class BLNETSwitch(SwitchDevice):
             self._state = 'off'
         self._icon = sensor_data.get('icon')
         self._mode = sensor_data.get('mode')
+        
+        self._last_updated = last_blnet_update
+        self._assumed_state = False
 
     @property
     def name(self):
@@ -96,7 +107,15 @@ class BLNETSwitch(SwitchDevice):
     def turn_on(self, **kwargs):
         """Turn the device on."""
         self.communication.turn_on(self._id)
+        self._state = 'on'
+        self._assumed_state = True
 
     def turn_off(self, **kwargs):
         """Turn the device off."""
         self.communication.turn_off(self._id)
+        self._state = 'off'
+        self._assumed_state = True
+    
+    @property
+    def assumed_state(self)->bool:
+        return self._assumed_state
