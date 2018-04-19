@@ -11,6 +11,7 @@ from homeassistant.const import (
     CONF_RESOURCE, CONF_PASSWORD, CONF_SCAN_INTERVAL)
 from homeassistant.helpers.event import async_track_time_interval
 from datetime import timedelta
+from datetime import datetime
 import homeassistant.helpers.config_validation as cv
 
 REQUIREMENTS = [
@@ -111,6 +112,7 @@ class BLNETComm(object):
         self.node = node
         # Map id -> attributes
         self.data = dict()
+        self._last_updated = None
 
     def _node_check(self):
         if self.node != DEFAULT_NODE:
@@ -134,6 +136,9 @@ class BLNETComm(object):
             # only change active node if this is desired
             self._node_check()
             self.blnet.set_digital_value(switch_id, 'AUTO')
+
+    def last_updated(self):
+        return self._last_updated
 
     def update(self):
         """Get the latest data from REST API and update the state."""
@@ -182,3 +187,5 @@ class BLNETComm(object):
                     attributes['icon'] = 'mdi:toggle-switch-off'
 
                 self.data[entity_id] = attributes
+        
+        self._last_updated = datetime.now()
