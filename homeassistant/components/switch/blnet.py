@@ -27,7 +27,7 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     blnet_id = discovery_info['ent_id']
     comm = hass.data['{}_data'.format(DOMAIN)]
 
-    add_devices([BLNETSwitch(hass, switch_id, blnet_id, comm)], True)
+    add_devices([BLNETSwitch(switch_id, blnet_id, comm)], True)
     return True
 
 
@@ -53,10 +53,10 @@ class BLNETSwitch(SwitchDevice):
     def update(self):
         """Get the latest data from communication device """
         # check if new data has arrived
-        if self._last_updated is not None:
-            last_blnet_update = self.communication.last_updated()
-            if last_blnet_update == self._last_updated:
-                return
+        last_blnet_update = self.communication.last_updated()
+
+        if last_blnet_update == self._last_updated:
+            return
 
         sensor_data = self.communication.data.get(self._blnet_id)
 
