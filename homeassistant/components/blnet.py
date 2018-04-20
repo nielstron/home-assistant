@@ -188,4 +188,5 @@ class BLNETComm(object):
 
                 self.data[entity_id] = attributes
 
+        # save that the data was updated now
         self._last_updated = datetime.now()
