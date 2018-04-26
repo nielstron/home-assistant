@@ -15,7 +15,7 @@ from datetime import datetime
 import homeassistant.helpers.config_validation as cv
 
 REQUIREMENTS = [
-    'pyblnet==0.4.1'
+    'pyblnet==0.4.2'
     ]
 
 _LOGGER = logging.getLogger(__name__)
