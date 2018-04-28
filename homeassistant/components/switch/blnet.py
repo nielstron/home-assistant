@@ -1,6 +1,7 @@
 """
 Connect to a BL-NET via it's web interface and read and write data
-TODO: as component
+
+Switch to control digital outputs
 """
 import logging
 
@@ -37,7 +38,7 @@ class BLNETSwitch(SwitchDevice):
     """
 
     def __init__(self, switch_id, blnet_id, comm):
-        """Initialize the MQTT switch."""
+        """Initialize the switch."""
         self._blnet_id = blnet_id
         self._id = switch_id
         self.communication = comm
