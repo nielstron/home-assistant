@@ -135,9 +135,9 @@ class BLNETModeSwitch(SwitchDevice):
         self._name = '{}_automated'.format(blnet_id)
         self._friendly_name = blnet_id
         self._state = STATE_UNKNOWN
+        self._activation_state = self._state
         self._assumed_state = True
         self._icon = None
-        self._mode = STATE_UNKNOWN
         self._last_updated = None
 
     def update(self):
@@ -157,7 +157,7 @@ class BLNETModeSwitch(SwitchDevice):
             sensor_data.get('friendly_name'))
         if sensor_data.get('mode') == 'HAND':
             self._state = 'off'
-            self._icon = 'mdi:hand'
+            self._icon = 'mdi:gesture-tap'
         else:
             self._state = 'on'
             self._icon = 'mdi:settings'
