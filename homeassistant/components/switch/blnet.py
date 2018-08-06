@@ -202,7 +202,7 @@ class BLNETModeSwitch(SwitchDevice):
 
     def turn_off(self, **kwargs):
         """Turn the device off."""
-        if self._activation_state == 'on':
+        if self._activation_state == 'EIN':
             self.communication.turn_on(self._id)
         else:
             self.communication.turn_off(self._id)
