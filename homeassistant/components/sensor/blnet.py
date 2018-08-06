@@ -21,6 +21,7 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
 
     sensor_id = discovery_info['id']
     blnet_id = discovery_info['ent_id']
+    digital = discovery_info['digital']
     comm = hass.data['{}_data'.format(DOMAIN)]
 
     add_devices([BLNETComponent(hass, sensor_id, blnet_id, comm)], True)

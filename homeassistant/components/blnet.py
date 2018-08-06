@@ -61,7 +61,6 @@ def setup(hass, config):
     node = can_node
 
     # set the communication entity
-    # TODO
     hass.data[DOMAIN + '_data'] = BLNETComm(blnet, node)
 
     # make sure the communication device gets updated once in a while
@@ -99,7 +98,7 @@ def setup(hass, config):
             'ent_id': '{}_digital_{}'.format(DOMAIN, sensor['id']),
             'id': sensor['id']
             }
-        load_platform(hass, 'switch', DOMAIN, disc_info)
+        load_platform(hass, 'sensor', DOMAIN, disc_info)
 
     return True
 
@@ -174,7 +173,10 @@ class BLNETComm(object):
 
                 attributes.setdefault('friendly_name', sensor['name'])
                 attributes['mode'] = sensor['mode']
-                attributes['value'] = sensor['value']
+                if sensor.get('value') == 'EIN':
+                    attributes['state'] = 'on'
+                else:
+                    attributes['state'] = 'off'
                 # Change the symbol according to current mode and setting
                 # Automated switch => gear symbol
                 if sensor['mode'] == 'AUTO':
@@ -185,7 +187,8 @@ class BLNETComm(object):
                 # Nonautomated switch, toggled off => switch off
                 else:
                     attributes['icon'] = 'mdi:toggle-switch-off'
-
+                
+                attributes['unit_of_measurement'] = None
                 self.data[entity_id] = attributes
 
         # save that the data was updated now

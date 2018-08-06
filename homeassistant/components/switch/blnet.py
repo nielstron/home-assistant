@@ -65,11 +65,7 @@ class BLNETSwitch(SwitchDevice):
             return
 
         self._friendly_name = sensor_data.get('friendly_name')
-        if sensor_data.get('value') == 'EIN':
-            self._state = 'on'
-        # Nonautomated switch, toggled off => switch off
-        else:
-            self._state = 'off'
+        self._state = sensor_data.get('value')
         self._icon = sensor_data.get('icon')
         self._mode = sensor_data.get('mode')
 
