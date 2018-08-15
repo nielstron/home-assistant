@@ -25,8 +25,8 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
         return False
 
     switch_id = discovery_info['id']
-    blnet_id = discovery_info['ent_id']
-    comm = hass.data['{}_data'.format(DOMAIN)]
+    blnet_id = discovery_info['name']
+    comm = hass.data['DATA_{}'.format(DOMAIN)]
 
     add_devices([BLNETSwitch(switch_id, blnet_id, comm),
                  BLNETModeSwitch(switch_id, blnet_id, comm)], True)
@@ -65,7 +65,7 @@ class BLNETSwitch(SwitchDevice):
             return
 
         self._friendly_name = sensor_data.get('friendly_name')
-        if sensor_data.get('value') == 'EIN':
+        if sensor_data.get('value') == 1:
             self._state = 'on'
         # Nonautomated switch, toggled off => switch off
         else:
@@ -132,7 +132,7 @@ class BLNETModeSwitch(SwitchDevice):
         self._blnet_id = blnet_id
         self._id = switch_id
         self.communication = comm
-        self._name = '{}_automated'.format(blnet_id)
+        self._name = '{} automated'.format(blnet_id)
         self._friendly_name = blnet_id
         self._state = STATE_UNKNOWN
         self._activation_state = self._state
@@ -202,7 +202,7 @@ class BLNETModeSwitch(SwitchDevice):
 
     def turn_off(self, **kwargs):
         """Turn the device off."""
-        if self._activation_state == 'EIN':
+        if self._activation_state == 1:
             self.communication.turn_on(self._id)
         else:
             self.communication.turn_off(self._id)
