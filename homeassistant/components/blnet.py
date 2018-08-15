@@ -86,7 +86,6 @@ def setup(hass, config):
     blnet = BLNET(resource, password=password, web_port=web_port, 
                   ta_port=ta_port, use_web=use_web, use_ta=use_ta)
 
-    _LOGGER.warning(blnet.blnet_web)
     # set the communication entity
     hass.data["DATA_{}".format(DOMAIN)] = BLNETComm(blnet, can_node)
 
