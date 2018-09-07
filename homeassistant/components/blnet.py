@@ -58,7 +58,7 @@ CONFIG_SCHEMA = vol.Schema({
         vol.Optional(CONF_WEB_PORT, default=DEFAULT_WEB_PORT): cv.positive_int,
         vol.Optional(CONF_TA_PORT, default=DEFAULT_TA_PORT): cv.positive_int,
         vol.Optional(CONF_USE_WEB, default=True): cv.boolean,
-        vol.Optional(CONF_USE_TA, default=True): cv.boolean
+        vol.Optional(CONF_USE_TA, default=False): cv.boolean
        }),
 }, extra=vol.ALLOW_EXTRA)
 
