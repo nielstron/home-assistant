@@ -108,7 +108,7 @@ def setup(hass, config):
                 'domain': domain,
                 'id': sensor_id
             }
-            load_platform(hass, 'sensor', DOMAIN, disc_info)
+            load_platform(hass, 'sensor', DOMAIN, disc_info, config)
 
     # iterate through the list and create a sensor for every value
     for sensor_id in data['digital']:
@@ -121,7 +121,7 @@ def setup(hass, config):
             component = 'switch'
         else:
             component = 'sensor'
-        load_platform(hass, 'switch', DOMAIN, disc_info)
+        load_platform(hass, 'switch', DOMAIN, disc_info, config)
 
     return True
 
