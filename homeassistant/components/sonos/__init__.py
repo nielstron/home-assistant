@@ -1,10 +1,10 @@
 """Component to embed Sonos."""
-from homeassistant import data_entry_flow
+from homeassistant import config_entries
 from homeassistant.helpers import config_entry_flow
 
 
 DOMAIN = 'sonos'
-REQUIREMENTS = ['SoCo==0.14']
+REQUIREMENTS = ['pysonos==0.0.3']
 
 
 async def async_setup(hass, config):
@@ -15,7 +15,7 @@ async def async_setup(hass, config):
 
     if conf is not None:
         hass.async_create_task(hass.config_entries.flow.async_init(
-            DOMAIN, source=data_entry_flow.SOURCE_IMPORT))
+            DOMAIN, context={'source': config_entries.SOURCE_IMPORT}))
 
     return True
 
@@ -29,9 +29,10 @@ async def async_setup_entry(hass, entry):
 
 async def _async_has_devices(hass):
     """Return if there are devices that can be discovered."""
-    import soco
+    import pysonos
 
-    return await hass.async_add_executor_job(soco.discover)
+    return await hass.async_add_executor_job(pysonos.discover)
 
 
-config_entry_flow.register_discovery_flow(DOMAIN, 'Sonos', _async_has_devices)
+config_entry_flow.register_discovery_flow(
+    DOMAIN, 'Sonos', _async_has_devices, config_entries.CONN_CLASS_LOCAL_PUSH)
