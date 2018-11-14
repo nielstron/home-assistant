@@ -79,7 +79,7 @@ def setup(hass, config):
     use_ta = config.get(CONF_USE_TA)
 
     if test_blnet(resource) is False:
-        _LOGGER.error("No BL-Net reached at %", resource)
+        _LOGGER.error("No BL-Net reached at {}".format(resource))
         return False
 
     # Initialize the BL-NET sensor
