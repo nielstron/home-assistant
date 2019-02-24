@@ -78,13 +78,17 @@ def setup(hass, config):
     use_web = config.get(CONF_USE_WEB)
     use_ta = config.get(CONF_USE_TA)
 
-    if test_blnet(resource) is False:
-        _LOGGER.error("No BL-Net reached at {}".format(resource))
+    # Initialize the BL-NET sensor
+    try:
+        blnet = BLNET(resource, password=password, web_port=web_port,
+                      ta_port=ta_port, use_web=use_web, use_ta=use_ta)
+    except (ValueError, AssertionError) as ex:
+        if isinstance(ex, ValueError):
+            _LOGGER.error("No BL-Net reached at {}".format(resource))
+        else:
+            _LOGGER.error("Configuration invalid: {}".format(ex))
         return False
 
-    # Initialize the BL-NET sensor
-    blnet = BLNET(resource, password=password, web_port=web_port,
-                  ta_port=ta_port, use_web=use_web, use_ta=use_ta)
 
     # set the communication entity
     hass.data["DATA_{}".format(DOMAIN)] = BLNETComm(blnet, can_node)
@@ -100,9 +104,12 @@ def setup(hass, config):
                               fetch_data,
                               timedelta(seconds=scan_interval))
 
+    i = 0
     # iterate through the list and create a sensor for every value
     for domain in ['analog', 'speed', 'power', 'energy']:
         for sensor_id in data[domain]:
+            _LOGGER.info("Discovered {} sensor {} in use, adding".format(domain, sensor_id))
+            i+=1
             disc_info = {
                 'name': '{} {} {}'.format(DOMAIN, domain, sensor_id),
                 'domain': domain,
@@ -112,6 +119,8 @@ def setup(hass, config):
 
     # iterate through the list and create a sensor for every value
     for sensor_id in data['digital']:
+        _LOGGER.info("Discovered digital sensor {} in use, adding".format(sensor_id))
+        i+=1
         disc_info = {
             'name': '{} digital {}'.format(DOMAIN, sensor_id),
             'id': sensor_id,
@@ -122,6 +131,7 @@ def setup(hass, config):
         else:
             component = 'sensor'
         load_platform(hass, component, DOMAIN, disc_info, config)
+    _LOGGER.info("Added overall {} sensors".format(i))
 
     return True
 
