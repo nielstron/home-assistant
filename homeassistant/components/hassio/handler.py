@@ -1,9 +1,4 @@
-"""
-Exposes regular REST commands as services.
-
-For more details about this platform, please refer to the documentation at
-https://home-assistant.io/components/hassio/
-"""
+"""Handler for Hass.io."""
 import asyncio
 import logging
 import os
@@ -105,7 +100,7 @@ class HassIO:
 
         This method return a coroutine.
         """
-        return self.send_command("/homeassistant/check", timeout=300)
+        return self.send_command("/homeassistant/check", timeout=600)
 
     @_api_data
     def retrieve_discovery_messages(self):

@@ -319,7 +319,7 @@ class Entity:
     @callback
     def async_schedule_update_ha_state(self, force_refresh=False):
         """Schedule an update ha state change task."""
-        self.hass.async_add_job(self.async_update_ha_state(force_refresh))
+        self.hass.async_create_task(self.async_update_ha_state(force_refresh))
 
     async def async_device_update(self, warning=True):
         """Process 'update' or 'async_update' from entity.
@@ -363,10 +363,7 @@ class Entity:
 
     async def async_remove(self):
         """Remove entity from Home Assistant."""
-        will_remove = getattr(self, 'async_will_remove_from_hass', None)
-
-        if will_remove:
-            await will_remove()  # pylint: disable=not-callable
+        await self.async_will_remove_from_hass()
 
         if self._on_remove is not None:
             while self._on_remove:
@@ -389,6 +386,12 @@ class Entity:
             await self.platform.async_add_entities([self])
 
         self.hass.async_create_task(readd())
+
+    async def async_added_to_hass(self) -> None:
+        """Run when entity about to be added to hass."""
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Run when entity will be removed from hass."""
 
     def __eq__(self, other):
         """Return the comparison."""

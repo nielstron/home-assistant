@@ -32,11 +32,11 @@ COMMENT_REQUIREMENTS = (
     'i2csense',
     'credstash',
     'bme680',
-    'homekit',
     'py_noaa',
 )
 
 TEST_REQUIREMENTS = (
+    'aioambient',
     'aioautomatic',
     'aiohttp_cors',
     'aiohue',
@@ -46,25 +46,32 @@ TEST_REQUIREMENTS = (
     'coinmarketcap',
     'defusedxml',
     'dsmr_parser',
+    'eebrightbox',
+    'emulated_roku',
+    'enturclient',
     'ephem',
     'evohomeclient',
-    'feedparser',
+    'feedparser-homeassistant',
     'foobot_async',
-    'gTTS-token',
     'geojson_client',
     'georss_client',
+    'gTTS-token',
+    'ha-ffmpeg',
     'hangups',
     'HAP-python',
-    'ha-ffmpeg',
     'haversine',
     'hbmqtt',
     'hdate',
     'holidays',
     'home-assistant-frontend',
+    'homekit',
     'homematicip',
     'influxdb',
+    'jsonpath',
     'libpurecoollink',
     'libsoundtouch',
+    'luftdaten',
+    'mbddns',
     'mficlient',
     'numpy',
     'paho-mqtt',
@@ -83,6 +90,9 @@ TEST_REQUIREMENTS = (
     'pynx584',
     'pyopenuv',
     'pyotp',
+    'pyps4-homeassistant',
+    'pysmartapp',
+    'pysmartthings',
     'pysonos',
     'pyqwikswitch',
     'PyRMVtransport',
@@ -90,10 +100,13 @@ TEST_REQUIREMENTS = (
     'pyspcwebgw',
     'python-forecastio',
     'python-nest',
-    'pytradfri\[async\]',
+    'python_awair',
+    'pytradfri\\[async\\]',
     'pyunifi',
     'pyupnp-async',
     'pywebpush',
+    'pyHS100',
+    'regenmaschine',
     'restrictedpython',
     'rflink',
     'ring_doorbell',
@@ -103,15 +116,18 @@ TEST_REQUIREMENTS = (
     'smhi-pkg',
     'somecomfort',
     'sqlalchemy',
+    'srpenergy',
     'statsd',
     'uvcclient',
+    'vsure',
     'warrant',
-    'yahoo-finance',
     'pythonwhois',
     'wakeonlan',
     'vultr',
     'YesssSMS',
     'ruamel.yaml',
+    'zigpy-homeassistant',
+    'bellows-homeassistant',
 )
 
 IGNORE_PACKAGES = (
@@ -140,6 +156,9 @@ enum34==1000000000.0.0
 
 # This is a old unmaintained library and is replaced with pycryptodome
 pycrypto==1000000000.0.0
+
+# Contains code to modify Home Assistant to work around our rules
+python-systemair-savecair==1000000000.0.0
 """
 
 
@@ -200,7 +219,7 @@ def gather_modules():
         for req in module.REQUIREMENTS:
             if req in IGNORE_REQ:
                 continue
-            if '://' in req:
+            if '://' in req and 'pyharmony' not in req:
                 errors.append(
                     "{}[Only pypi dependencies are allowed: {}]".format(
                         package, req))

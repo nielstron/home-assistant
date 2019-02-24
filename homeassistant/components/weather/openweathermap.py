@@ -1,9 +1,4 @@
-"""
-Support for the OpenWeatherMap (OWM) service.
-
-For more details about this platform, please refer to the documentation at
-https://home-assistant.io/components/weather.openweathermap/
-"""
+"""Support for the OpenWeatherMap (OWM) service."""
 from datetime import timedelta
 import logging
 
@@ -11,22 +6,21 @@ import voluptuous as vol
 
 from homeassistant.components.weather import (
     ATTR_FORECAST_CONDITION, ATTR_FORECAST_PRECIPITATION, ATTR_FORECAST_TEMP,
-    ATTR_FORECAST_TEMP_LOW, ATTR_FORECAST_TIME, ATTR_FORECAST_WIND_SPEED,
-    ATTR_FORECAST_WIND_BEARING,
-    PLATFORM_SCHEMA, WeatherEntity)
+    ATTR_FORECAST_TEMP_LOW, ATTR_FORECAST_TIME, ATTR_FORECAST_WIND_BEARING,
+    ATTR_FORECAST_WIND_SPEED, PLATFORM_SCHEMA, WeatherEntity)
 from homeassistant.const import (
-    CONF_API_KEY, TEMP_CELSIUS, CONF_LATITUDE, CONF_LONGITUDE, CONF_MODE,
-    CONF_NAME, STATE_UNKNOWN)
+    CONF_API_KEY, CONF_LATITUDE, CONF_LONGITUDE, CONF_MODE, CONF_NAME,
+    STATE_UNKNOWN, TEMP_CELSIUS)
 import homeassistant.helpers.config_validation as cv
 from homeassistant.util import Throttle
 
-REQUIREMENTS = ['pyowm==2.9.0']
+REQUIREMENTS = ['pyowm==2.10.0']
 
 _LOGGER = logging.getLogger(__name__)
 
 ATTRIBUTION = 'Data provided by OpenWeatherMap'
 
-FORECAST_MODE = ['hourly', 'daily']
+FORECAST_MODE = ['hourly', 'daily', 'freedaily']
 
 DEFAULT_NAME = 'OpenWeatherMap'
 
@@ -149,7 +143,21 @@ class OpenWeatherMapWeather(WeatherEntity):
     def forecast(self):
         """Return the forecast array."""
         data = []
-        for entry in self.forecast_data.get_weathers():
+
+        def calc_precipitation(rain, snow):
+            """Calculate the precipitation."""
+            rain_value = 0 if rain is None else rain
+            snow_value = 0 if snow is None else snow
+            if round(rain_value + snow_value, 1) == 0:
+                return None
+            return round(rain_value + snow_value, 1)
+
+        if self._mode == 'freedaily':
+            weather = self.forecast_data.get_weathers()[::8]
+        else:
+            weather = self.forecast_data.get_weathers()
+
+        for entry in weather:
             if self._mode == 'daily':
                 data.append({
                     ATTR_FORECAST_TIME:
@@ -159,7 +167,9 @@ class OpenWeatherMapWeather(WeatherEntity):
                     ATTR_FORECAST_TEMP_LOW:
                         entry.get_temperature('celsius').get('night'),
                     ATTR_FORECAST_PRECIPITATION:
-                        entry.get_rain().get('all'),
+                        calc_precipitation(
+                            entry.get_rain().get('all'),
+                            entry.get_snow().get('all')),
                     ATTR_FORECAST_WIND_SPEED:
                         entry.get_wind().get('speed'),
                     ATTR_FORECAST_WIND_BEARING:

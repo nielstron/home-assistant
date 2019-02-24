@@ -2,6 +2,7 @@
 import voluptuous as vol
 
 from homeassistant.core import callback, Context
+from homeassistant.exceptions import Unauthorized
 
 from . import const, messages
 
@@ -29,6 +30,16 @@ class ActiveConnection:
         if user is None:
             return Context()
         return Context(user_id=user.id)
+
+    @callback
+    def send_result(self, msg_id, result=None):
+        """Send a result message."""
+        self.send_message(messages.result_message(msg_id, result))
+
+    @callback
+    def send_error(self, msg_id, code, message):
+        """Send a error message."""
+        self.send_message(messages.error_message(msg_id, code, message))
 
     @callback
     def async_handle(self, msg):
@@ -63,11 +74,8 @@ class ActiveConnection:
 
         try:
             handler(self.hass, self, schema(msg))
-        except Exception:  # pylint: disable=broad-except
-            self.logger.exception('Error handling message: %s', msg)
-            self.send_message(messages.error_message(
-                cur_id, const.ERR_UNKNOWN_ERROR,
-                'Unknown error.'))
+        except Exception as err:  # pylint: disable=broad-except
+            self.async_handle_exception(msg, err)
 
         self.last_id = cur_id
 
@@ -76,3 +84,20 @@ class ActiveConnection:
         """Close down connection."""
         for unsub in self.event_listeners.values():
             unsub()
+
+    @callback
+    def async_handle_exception(self, msg, err):
+        """Handle an exception while processing a handler."""
+        if isinstance(err, Unauthorized):
+            code = const.ERR_UNAUTHORIZED
+            err_message = 'Unauthorized'
+        elif isinstance(err, vol.Invalid):
+            code = const.ERR_INVALID_FORMAT
+            err_message = 'Invalid format'
+        else:
+            self.logger.exception('Error handling message: %s', msg)
+            code = const.ERR_UNKNOWN_ERROR
+            err_message = 'Unknown error'
+
+        self.send_message(
+            messages.error_message(msg['id'], code, err_message))

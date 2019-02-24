@@ -9,16 +9,20 @@ from homeassistant.helpers.entity import Entity
 
 ATTR_NATIVE_BALANCE = "Balance in native currency"
 
-BTC_ICON = 'mdi:currency-btc'
+CURRENCY_ICONS = {
+    'BTC': 'mdi:currency-btc',
+    'ETH': 'mdi:currency-eth',
+    'EUR': 'mdi:currency-eur',
+    'LTC': 'mdi:litecoin',
+    'USD': 'mdi:currency-usd'
+}
 
-COIN_ICON = 'mdi:coin'
+DEFAULT_COIN_ICON = 'mdi:coin'
 
-CONF_ATTRIBUTION = "Data provided by coinbase.com"
+ATTRIBUTION = "Data provided by coinbase.com"
 
 DATA_COINBASE = 'coinbase_cache'
 DEPENDENCIES = ['coinbase']
-
-ETH_ICON = 'mdi:currency-eth'
 
 
 def setup_platform(hass, config, add_entities, discovery_info=None):
@@ -68,17 +72,13 @@ class AccountSensor(Entity):
     @property
     def icon(self):
         """Return the icon to use in the frontend, if any."""
-        if self._name == "Coinbase BTC Wallet":
-            return BTC_ICON
-        if self._name == "Coinbase ETH Wallet":
-            return ETH_ICON
-        return COIN_ICON
+        return CURRENCY_ICONS.get(self._unit_of_measurement, DEFAULT_COIN_ICON)
 
     @property
     def device_state_attributes(self):
         """Return the state attributes of the sensor."""
         return {
-            ATTR_ATTRIBUTION: CONF_ATTRIBUTION,
+            ATTR_ATTRIBUTION: ATTRIBUTION,
             ATTR_NATIVE_BALANCE: "{} {}".format(
                 self._native_balance, self._native_currency),
         }
@@ -122,17 +122,13 @@ class ExchangeRateSensor(Entity):
     @property
     def icon(self):
         """Return the icon to use in the frontend, if any."""
-        if self._name == "BTC Exchange Rate":
-            return BTC_ICON
-        if self._name == "ETH Exchange Rate":
-            return ETH_ICON
-        return COIN_ICON
+        return CURRENCY_ICONS.get(self.currency, DEFAULT_COIN_ICON)
 
     @property
     def device_state_attributes(self):
         """Return the state attributes of the sensor."""
         return {
-            ATTR_ATTRIBUTION: CONF_ATTRIBUTION
+            ATTR_ATTRIBUTION: ATTRIBUTION
         }
 
     def update(self):

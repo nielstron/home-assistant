@@ -12,12 +12,14 @@ import socket
 import voluptuous as vol
 
 from homeassistant.components.media_player import (
-    MEDIA_TYPE_CHANNEL, PLATFORM_SCHEMA, SUPPORT_NEXT_TRACK, SUPPORT_PAUSE,
+    MediaPlayerDevice, PLATFORM_SCHEMA)
+from homeassistant.components.media_player.const import (
+    MEDIA_TYPE_CHANNEL, SUPPORT_NEXT_TRACK, SUPPORT_PAUSE,
     SUPPORT_PLAY, SUPPORT_PLAY_MEDIA, SUPPORT_PREVIOUS_TRACK, SUPPORT_TURN_OFF,
-    SUPPORT_TURN_ON, SUPPORT_VOLUME_MUTE, SUPPORT_VOLUME_STEP,
-    MediaPlayerDevice)
+    SUPPORT_TURN_ON, SUPPORT_VOLUME_MUTE, SUPPORT_VOLUME_STEP)
 from homeassistant.const import (
-    CONF_HOST, CONF_MAC, CONF_NAME, CONF_PORT, CONF_TIMEOUT, STATE_OFF)
+    CONF_HOST, CONF_MAC, CONF_NAME, CONF_PORT, CONF_TIMEOUT, STATE_OFF,
+    STATE_ON)
 import homeassistant.helpers.config_validation as cv
 from homeassistant.util import dt as dt_util
 
@@ -40,6 +42,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required(CONF_HOST): cv.string,
     vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
     vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
+    vol.Optional(CONF_MAC): cv.string,
     vol.Optional(CONF_TIMEOUT, default=DEFAULT_TIMEOUT): cv.positive_int,
 })
 
@@ -51,6 +54,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
         known_devices = set()
         hass.data[KNOWN_DEVICES_KEY] = known_devices
 
+    uuid = None
     # Is this a manual configuration?
     if config.get(CONF_HOST) is not None:
         host = config.get(CONF_HOST)
@@ -66,6 +70,9 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
         port = DEFAULT_PORT
         timeout = DEFAULT_TIMEOUT
         mac = None
+        udn = discovery_info.get('udn')
+        if udn and udn.startswith('uuid:'):
+            uuid = udn[len('uuid:'):]
     else:
         _LOGGER.warning("Cannot determine device")
         return
@@ -75,7 +82,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     ip_addr = socket.gethostbyname(host)
     if ip_addr not in known_devices:
         known_devices.add(ip_addr)
-        add_entities([SamsungTVDevice(host, port, name, timeout, mac)])
+        add_entities([SamsungTVDevice(host, port, name, timeout, mac, uuid)])
         _LOGGER.info("Samsung TV %s:%d added as '%s'", host, port, name)
     else:
         _LOGGER.info("Ignoring duplicate Samsung TV %s:%d", host, port)
@@ -84,7 +91,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
 class SamsungTVDevice(MediaPlayerDevice):
     """Representation of a Samsung TV."""
 
-    def __init__(self, host, port, name, timeout, mac):
+    def __init__(self, host, port, name, timeout, mac, uuid):
         """Initialize the Samsung device."""
         from samsungctl import exceptions
         from samsungctl import Remote
@@ -94,6 +101,7 @@ class SamsungTVDevice(MediaPlayerDevice):
         self._remote_class = Remote
         self._name = name
         self._mac = mac
+        self._uuid = uuid
         self._wol = wakeonlan
         # Assume that the TV is not muted
         self._muted = False
@@ -148,11 +156,11 @@ class SamsungTVDevice(MediaPlayerDevice):
                         BrokenPipeError):
                     # BrokenPipe can occur when the commands is sent to fast
                     self._remote = None
-            self._state = None
+            self._state = STATE_ON
         except (self._exceptions_class.UnhandledResponse,
                 self._exceptions_class.AccessDenied):
             # We got a response so it's on.
-            self._state = None
+            self._state = STATE_ON
             self._remote = None
             _LOGGER.debug("Failed sending command %s", key, exc_info=True)
             return
@@ -165,6 +173,11 @@ class SamsungTVDevice(MediaPlayerDevice):
     def _power_off_in_progress(self):
         return self._end_of_power_off is not None and \
                self._end_of_power_off > dt_util.utcnow()
+
+    @property
+    def unique_id(self) -> str:
+        """Return the unique ID of the device."""
+        return self._uuid
 
     @property
     def name(self):

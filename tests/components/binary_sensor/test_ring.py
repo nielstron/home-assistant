@@ -6,7 +6,7 @@ import requests_mock
 from homeassistant.components.binary_sensor import ring
 from homeassistant.components import ring as base_ring
 
-from tests.components.test_ring import ATTRIBUTION, VALID_CONFIG
+from tests.components.ring.test_init import ATTRIBUTION, VALID_CONFIG
 from tests.common import (
     get_test_config_dir, get_test_home_assistant, load_fixture)
 
@@ -64,13 +64,13 @@ class TestRingBinarySensorSetup(unittest.TestCase):
         for device in self.DEVICES:
             device.update()
             if device.name == 'Front Door Ding':
-                self.assertEqual('on', device.state)
-                self.assertEqual('America/New_York',
-                                 device.device_state_attributes['timezone'])
+                assert 'on' == device.state
+                assert 'America/New_York' == \
+                    device.device_state_attributes['timezone']
             elif device.name == 'Front Door Motion':
-                self.assertEqual('off', device.state)
-                self.assertEqual('motion', device.device_class)
+                assert 'off' == device.state
+                assert 'motion' == device.device_class
 
-            self.assertIsNone(device.entity_picture)
-            self.assertEqual(ATTRIBUTION,
-                             device.device_state_attributes['attribution'])
+            assert device.entity_picture is None
+            assert ATTRIBUTION == \
+                device.device_state_attributes['attribution']

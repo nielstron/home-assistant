@@ -19,6 +19,7 @@ STORAGE_VERSION = 1
 SAVE_DELAY = 10
 
 CONNECTION_NETWORK_MAC = 'mac'
+CONNECTION_UPNP = 'upnp'
 CONNECTION_ZIGBEE = 'zigbee'
 
 
@@ -35,7 +36,28 @@ class DeviceEntry:
     name = attr.ib(type=str, default=None)
     sw_version = attr.ib(type=str, default=None)
     hub_device_id = attr.ib(type=str, default=None)
+    area_id = attr.ib(type=str, default=None)
     id = attr.ib(type=str, default=attr.Factory(lambda: uuid.uuid4().hex))
+
+
+def format_mac(mac):
+    """Format the mac address string for entry into dev reg."""
+    to_test = mac
+
+    if len(to_test) == 17 and to_test.count(':') == 5:
+        return to_test.lower()
+
+    if len(to_test) == 17 and to_test.count('-') == 5:
+        to_test = to_test.replace('-', '')
+    elif len(to_test) == 14 and to_test.count('.') == 2:
+        to_test = to_test.replace('.', '')
+
+    if len(to_test) == 12:
+        # no : included
+        return ':'.join(to_test.lower()[i:i + 2] for i in range(0, 12, 2))
+
+    # Not sure how formatted, return original
+    return mac
 
 
 class DeviceRegistry:
@@ -71,6 +93,12 @@ class DeviceRegistry:
         if connections is None:
             connections = set()
 
+        connections = {
+            (key, format_mac(value)) if key == CONNECTION_NETWORK_MAC
+            else (key, value)
+            for key, value in connections
+        }
+
         device = self.async_get_device(identifiers, connections)
 
         if device is None:
@@ -87,13 +115,18 @@ class DeviceRegistry:
             device.id,
             add_config_entry_id=config_entry_id,
             hub_device_id=hub_device_id,
-            merge_connections=connections,
-            merge_identifiers=identifiers,
+            merge_connections=connections or _UNDEF,
+            merge_identifiers=identifiers or _UNDEF,
             manufacturer=manufacturer,
             model=model,
             name=name,
-            sw_version=sw_version,
+            sw_version=sw_version
         )
+
+    @callback
+    def async_update_device(self, device_id, *, area_id=_UNDEF):
+        """Update properties of a device."""
+        return self._async_update_device(device_id, area_id=area_id)
 
     @callback
     def _async_update_device(self, device_id, *, add_config_entry_id=_UNDEF,
@@ -104,7 +137,8 @@ class DeviceRegistry:
                              model=_UNDEF,
                              name=_UNDEF,
                              sw_version=_UNDEF,
-                             hub_device_id=_UNDEF):
+                             hub_device_id=_UNDEF,
+                             area_id=_UNDEF):
         """Update device attributes."""
         old = self.devices[device_id]
 
@@ -128,7 +162,8 @@ class DeviceRegistry:
                 ('identifiers', merge_identifiers),
         ):
             old_value = getattr(old, attr_name)
-            if value is not _UNDEF and value != old_value:
+            # If not undefined, check if `value` contains new items.
+            if value is not _UNDEF and not value.issubset(old_value):
                 changes[attr_name] = old_value | value
 
         for attr_name, value in (
@@ -140,6 +175,9 @@ class DeviceRegistry:
         ):
             if value is not _UNDEF and value != getattr(old, attr_name):
                 changes[attr_name] = value
+
+        if (area_id is not _UNDEF and area_id != old.area_id):
+            changes['area_id'] = area_id
 
         if not changes:
             return old
@@ -169,6 +207,8 @@ class DeviceRegistry:
                     id=device['id'],
                     # Introduced in 0.79
                     hub_device_id=device.get('hub_device_id'),
+                    # Introduced in 0.87
+                    area_id=device.get('area_id')
                 )
 
         self.devices = devices
@@ -194,6 +234,7 @@ class DeviceRegistry:
                 'sw_version': entry.sw_version,
                 'id': entry.id,
                 'hub_device_id': entry.hub_device_id,
+                'area_id': entry.area_id
             } for entry in self.devices.values()
         ]
 
@@ -206,6 +247,13 @@ class DeviceRegistry:
             if config_entry_id in device.config_entries:
                 self._async_update_device(
                     dev_id, remove_config_entry_id=config_entry_id)
+
+    @callback
+    def async_clear_area_id(self, area_id: str) -> None:
+        """Clear area id from registry entries."""
+        for dev_id, device in self.devices.items():
+            if area_id == device.area_id:
+                self._async_update_device(dev_id, area_id=None)
 
 
 @bind_hass

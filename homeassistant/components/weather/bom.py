@@ -1,20 +1,15 @@
-"""
-Support for Australian BOM (Bureau of Meteorology) weather service.
-
-For more details about this platform, please refer to the documentation at
-https://home-assistant.io/components/weather.bom/
-"""
+"""Support for Australian BOM (Bureau of Meteorology) weather service."""
 import logging
 
 import voluptuous as vol
 
-from homeassistant.components.weather import WeatherEntity, PLATFORM_SCHEMA
-from homeassistant.const import \
-    CONF_NAME, TEMP_CELSIUS, CONF_LATITUDE, CONF_LONGITUDE
-from homeassistant.helpers import config_validation as cv
 # Reuse data and API logic from the sensor implementation
-from homeassistant.components.sensor.bom import \
-    BOMCurrentData, closest_station, CONF_STATION, validate_station
+from homeassistant.components.sensor.bom import (
+    CONF_STATION, BOMCurrentData, closest_station, validate_station)
+from homeassistant.components.weather import PLATFORM_SCHEMA, WeatherEntity
+from homeassistant.const import (
+    CONF_LATITUDE, CONF_LONGITUDE, CONF_NAME, TEMP_CELSIUS)
+from homeassistant.helpers import config_validation as cv
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,7 +28,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     if station is None:
         _LOGGER.error("Could not get BOM weather station from lat/lon")
         return False
-    bom_data = BOMCurrentData(hass, station)
+    bom_data = BOMCurrentData(station)
     try:
         bom_data.update()
     except ValueError as err:

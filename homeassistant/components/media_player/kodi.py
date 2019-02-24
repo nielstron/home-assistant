@@ -16,13 +16,14 @@ import aiohttp
 import voluptuous as vol
 
 from homeassistant.components.media_player import (
-    DOMAIN, MEDIA_PLAYER_SCHEMA, MEDIA_TYPE_CHANNEL, MEDIA_TYPE_MOVIE,
+    MediaPlayerDevice, MEDIA_PLAYER_SCHEMA, PLATFORM_SCHEMA)
+from homeassistant.components.media_player.const import (
+    DOMAIN, MEDIA_TYPE_CHANNEL, MEDIA_TYPE_MOVIE,
     MEDIA_TYPE_MUSIC, MEDIA_TYPE_PLAYLIST, MEDIA_TYPE_TVSHOW, MEDIA_TYPE_VIDEO,
-    PLATFORM_SCHEMA, SUPPORT_NEXT_TRACK, SUPPORT_PAUSE, SUPPORT_PLAY,
+    SUPPORT_NEXT_TRACK, SUPPORT_PAUSE, SUPPORT_PLAY,
     SUPPORT_PLAY_MEDIA, SUPPORT_PREVIOUS_TRACK, SUPPORT_SEEK,
     SUPPORT_SHUFFLE_SET, SUPPORT_STOP, SUPPORT_TURN_OFF, SUPPORT_TURN_ON,
-    SUPPORT_VOLUME_MUTE, SUPPORT_VOLUME_SET, SUPPORT_VOLUME_STEP,
-    MediaPlayerDevice)
+    SUPPORT_VOLUME_MUTE, SUPPORT_VOLUME_SET, SUPPORT_VOLUME_STEP)
 from homeassistant.const import (
     CONF_HOST, CONF_NAME, CONF_PASSWORD, CONF_PORT, CONF_PROXY_SSL,
     CONF_TIMEOUT, CONF_USERNAME, EVENT_HOMEASSISTANT_STOP, STATE_IDLE,
@@ -33,6 +34,7 @@ from homeassistant.helpers import script
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.template import Template
 from homeassistant.util.yaml import dump
+import homeassistant.util.dt as dt_util
 
 REQUIREMENTS = ['jsonrpc-async==0.6', 'jsonrpc-websocket==0.6']
 
@@ -281,6 +283,8 @@ class KodiDevice(MediaPlayerDevice):
         self.hass = hass
         self._name = name
         self._unique_id = unique_id
+        self._media_position_updated_at = None
+        self._media_position = None
 
         kwargs = {
             'timeout': timeout,
@@ -313,6 +317,7 @@ class KodiDevice(MediaPlayerDevice):
             self._ws_server.Player.OnAVChange = self.async_on_speed_event
             self._ws_server.Player.OnResume = self.async_on_speed_event
             self._ws_server.Player.OnSpeedChanged = self.async_on_speed_event
+            self._ws_server.Player.OnSeek = self.async_on_speed_event
             self._ws_server.Player.OnStop = self.async_on_stop
             self._ws_server.Application.OnVolumeChanged = \
                 self.async_on_volume_changed
@@ -371,6 +376,8 @@ class KodiDevice(MediaPlayerDevice):
         self._players = []
         self._properties = {}
         self._item = {}
+        self._media_position_updated_at = None
+        self._media_position = None
         self.async_schedule_update_ha_state()
 
     @callback
@@ -473,6 +480,11 @@ class KodiDevice(MediaPlayerDevice):
                 ['time', 'totaltime', 'speed', 'live']
             )
 
+            position = self._properties['time']
+            if self._media_position != position:
+                self._media_position_updated_at = dt_util.utcnow()
+                self._media_position = position
+
             self._item = (await self.server.Player.GetItem(
                 player_id,
                 ['title', 'file', 'uniqueid', 'thumbnail', 'artist',
@@ -482,6 +494,8 @@ class KodiDevice(MediaPlayerDevice):
             self._properties = {}
             self._item = {}
             self._app_properties = {}
+            self._media_position = None
+            self._media_position_updated_at = None
 
     @property
     def server(self):
@@ -542,6 +556,24 @@ class KodiDevice(MediaPlayerDevice):
             total_time['hours'] * 3600 +
             total_time['minutes'] * 60 +
             total_time['seconds'])
+
+    @property
+    def media_position(self):
+        """Position of current playing media in seconds."""
+        time = self._properties.get('time')
+
+        if time is None:
+            return None
+
+        return (
+            time['hours'] * 3600 +
+            time['minutes'] * 60 +
+            time['seconds'])
+
+    @property
+    def media_position_updated_at(self):
+        """Last valid time of media position."""
+        return self._media_position_updated_at
 
     @property
     def media_image_url(self):

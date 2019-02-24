@@ -28,8 +28,8 @@ SENSOR_TYPES = {
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required(CONF_URL): cv.url,
     vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-    vol.Optional(CONF_MONITORED_VARIABLES, default=[]): vol.All(
-        cv.ensure_list, [vol.In(SENSOR_TYPES)]),
+    vol.Optional(CONF_MONITORED_VARIABLES, default=list(SENSOR_TYPES)):
+        vol.All(cv.ensure_list, [vol.In(SENSOR_TYPES)]),
 })
 
 
@@ -110,11 +110,11 @@ class RTorrentSensor(Entity):
         if self.type == SENSOR_TYPE_CURRENT_STATUS:
             if self.data:
                 if upload > 0 and download > 0:
-                    self._state = 'Up/Down'
+                    self._state = 'up_down'
                 elif upload > 0 and download == 0:
-                    self._state = 'Seeding'
+                    self._state = 'seeding'
                 elif upload == 0 and download > 0:
-                    self._state = 'Downloading'
+                    self._state = 'downloading'
                 else:
                     self._state = STATE_IDLE
             else:

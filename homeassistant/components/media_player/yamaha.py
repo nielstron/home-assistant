@@ -10,18 +10,20 @@ import requests
 import voluptuous as vol
 
 from homeassistant.components.media_player import (
-    DOMAIN, MEDIA_PLAYER_SCHEMA, MEDIA_TYPE_MUSIC, PLATFORM_SCHEMA,
+    MediaPlayerDevice, MEDIA_PLAYER_SCHEMA, PLATFORM_SCHEMA)
+from homeassistant.components.media_player.const import (
+    DOMAIN, MEDIA_TYPE_MUSIC,
     SUPPORT_NEXT_TRACK, SUPPORT_PAUSE, SUPPORT_PLAY, SUPPORT_PLAY_MEDIA,
     SUPPORT_PREVIOUS_TRACK, SUPPORT_SELECT_SOURCE, SUPPORT_STOP,
     SUPPORT_TURN_OFF, SUPPORT_TURN_ON, SUPPORT_VOLUME_MUTE, SUPPORT_VOLUME_SET,
-    SUPPORT_SELECT_SOUND_MODE, MediaPlayerDevice)
+    SUPPORT_SELECT_SOUND_MODE)
 
 from homeassistant.const import (
     ATTR_ENTITY_ID, CONF_HOST, CONF_NAME, STATE_IDLE, STATE_OFF, STATE_ON,
     STATE_PLAYING)
 import homeassistant.helpers.config_validation as cv
 
-REQUIREMENTS = ['rxv==0.5.1']
+REQUIREMENTS = ['rxv==0.6.0']
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -185,9 +187,10 @@ class YamahaDevice(MediaPlayerDevice):
         self._playback_support = self.receiver.get_playback_support()
         self._is_playback_supported = self.receiver.is_playback_supported(
             self._current_source)
-        if self._zone == "Main_Zone":
+        surround_programs = self.receiver.surround_programs()
+        if surround_programs:
             self._sound_mode = self.receiver.surround_program
-            self._sound_mode_list = self.receiver.surround_programs()
+            self._sound_mode_list = surround_programs
         else:
             self._sound_mode = None
             self._sound_mode_list = None
