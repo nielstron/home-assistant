@@ -6,13 +6,15 @@ https://home-assistant.io/components/sensor.uk_transport/
 import logging
 import re
 from datetime import datetime, timedelta
+
 import requests
 import voluptuous as vol
 
+import homeassistant.helpers.config_validation as cv
 from homeassistant.components.sensor import PLATFORM_SCHEMA
+from homeassistant.const import CONF_MODE
 from homeassistant.helpers.entity import Entity
 from homeassistant.util import Throttle
-import homeassistant.helpers.config_validation as cv
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,7 +30,6 @@ ATTR_NEXT_TRAINS = 'next_trains'
 CONF_API_APP_KEY = 'app_key'
 CONF_API_APP_ID = 'app_id'
 CONF_QUERIES = 'queries'
-CONF_MODE = 'mode'
 CONF_ORIGIN = 'origin'
 CONF_DESTINATION = 'destination'
 
@@ -46,7 +47,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 })
 
 
-def setup_platform(hass, config, add_devices, discovery_info=None):
+def setup_platform(hass, config, add_entities, discovery_info=None):
     """Get the uk_transport sensor."""
     sensors = []
     number_sensors = len(config.get(CONF_QUERIES))
@@ -75,7 +76,7 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
                     calling_at,
                     interval))
 
-    add_devices(sensors, True)
+    add_entities(sensors, True)
 
 
 class UkTransportSensor(Entity):
@@ -131,7 +132,7 @@ class UkTransportSensor(Entity):
             _LOGGER.warning('Invalid response from API')
         elif 'error' in response.json():
             if 'exceeded' in response.json()['error']:
-                self._state = 'Useage limites exceeded'
+                self._state = 'Usage limits exceeded'
             if 'invalid' in response.json()['error']:
                 self._state = 'Credentials invalid'
         else:
@@ -180,9 +181,12 @@ class UkTransportLiveBusTimeSensor(UkTransportSensor):
                             'estimated': departure['best_departure_estimate']
                         })
 
-            self._state = min(map(
-                _delta_mins, [bus['scheduled'] for bus in self._next_buses]
-            ))
+            if self._next_buses:
+                self._state = min(
+                    _delta_mins(bus['scheduled'])
+                    for bus in self._next_buses)
+            else:
+                self._state = None
 
     @property
     def device_state_attributes(self):
@@ -242,10 +246,12 @@ class UkTransportLiveTrainTimeSensor(UkTransportSensor):
                         'operator_name': departure['operator_name']
                         })
 
-                self._state = min(map(
-                    _delta_mins,
-                    [train['scheduled'] for train in self._next_trains]
-                ))
+                if self._next_trains:
+                    self._state = min(
+                        _delta_mins(train['scheduled'])
+                        for train in self._next_trains)
+                else:
+                    self._state = None
 
     @property
     def device_state_attributes(self):

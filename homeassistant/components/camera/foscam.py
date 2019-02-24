@@ -15,7 +15,7 @@ from homeassistant.helpers import config_validation as cv
 
 _LOGGER = logging.getLogger(__name__)
 
-REQUIREMENTS = ['pyfoscam==1.2']
+REQUIREMENTS = ['libpyfoscam==1.0']
 
 CONF_IP = 'ip'
 
@@ -33,10 +33,9 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 })
 
 
-# pylint: disable=unused-argument
-def setup_platform(hass, config, add_devices, discovery_info=None):
+def setup_platform(hass, config, add_entities, discovery_info=None):
     """Set up a Foscam IP Camera."""
-    add_devices([FoscamCam(config)])
+    add_entities([FoscamCam(config)])
 
 
 class FoscamCam(Camera):
@@ -44,6 +43,8 @@ class FoscamCam(Camera):
 
     def __init__(self, device_info):
         """Initialize a Foscam camera."""
+        from libpyfoscam import FoscamCamera
+
         super(FoscamCam, self).__init__()
 
         ip_address = device_info.get(CONF_IP)
@@ -53,13 +54,11 @@ class FoscamCam(Camera):
         self._name = device_info.get(CONF_NAME)
         self._motion_status = False
 
-        from foscam import FoscamCamera
-
-        self._foscam_session = FoscamCamera(ip_address, port, self._username,
-                                            self._password)
+        self._foscam_session = FoscamCamera(
+            ip_address, port, self._username, self._password, verbose=False)
 
     def camera_image(self):
-        """Return a still image reponse from the camera."""
+        """Return a still image response from the camera."""
         # Send the request to snap a picture and return raw jpg data
         # Handle exception if host is not reachable or url failed
         result, response = self._foscam_session.snap_picture_2()
@@ -75,20 +74,20 @@ class FoscamCam(Camera):
 
     def enable_motion_detection(self):
         """Enable motion detection in camera."""
-        ret, err = self._foscam_session.enable_motion_detection()
-        if ret == FOSCAM_COMM_ERROR:
-            _LOGGER.debug("Unable to communicate with Foscam Camera: %s", err)
-            self._motion_status = True
-        else:
+        try:
+            ret = self._foscam_session.enable_motion_detection()
+            self._motion_status = ret == FOSCAM_COMM_ERROR
+        except TypeError:
+            _LOGGER.debug("Communication problem")
             self._motion_status = False
 
     def disable_motion_detection(self):
         """Disable motion detection."""
-        ret, err = self._foscam_session.disable_motion_detection()
-        if ret == FOSCAM_COMM_ERROR:
-            _LOGGER.debug("Unable to communicate with Foscam Camera: %s", err)
-            self._motion_status = True
-        else:
+        try:
+            ret = self._foscam_session.disable_motion_detection()
+            self._motion_status = ret == FOSCAM_COMM_ERROR
+        except TypeError:
+            _LOGGER.debug("Communication problem")
             self._motion_status = False
 
     @property

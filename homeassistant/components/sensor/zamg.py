@@ -5,24 +5,25 @@ For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/sensor.zamg/
 """
 import csv
+from datetime import datetime, timedelta
 import gzip
 import json
 import logging
 import os
-from datetime import datetime, timedelta
 
+from aiohttp.hdrs import USER_AGENT
 import pytz
 import requests
 import voluptuous as vol
 
-import homeassistant.helpers.config_validation as cv
 from homeassistant.components.weather import (
-    ATTR_WEATHER_HUMIDITY, ATTR_WEATHER_ATTRIBUTION, ATTR_WEATHER_PRESSURE,
-    ATTR_WEATHER_TEMPERATURE, ATTR_WEATHER_WIND_BEARING,
-    ATTR_WEATHER_WIND_SPEED)
+    ATTR_WEATHER_HUMIDITY, ATTR_WEATHER_PRESSURE, ATTR_WEATHER_WIND_SPEED,
+    ATTR_WEATHER_ATTRIBUTION, ATTR_WEATHER_TEMPERATURE,
+    ATTR_WEATHER_WIND_BEARING)
 from homeassistant.const import (
-    CONF_MONITORED_CONDITIONS, CONF_NAME, __version__,
-    CONF_LATITUDE, CONF_LONGITUDE)
+    CONF_NAME, CONF_LATITUDE, CONF_LONGITUDE, CONF_MONITORED_CONDITIONS,
+    __version__)
+import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.entity import Entity
 from homeassistant.util import Throttle
 
@@ -30,13 +31,12 @@ _LOGGER = logging.getLogger(__name__)
 
 ATTR_STATION = 'station'
 ATTR_UPDATED = 'updated'
-ATTRIBUTION = 'Data provided by ZAMG'
+ATTRIBUTION = "Data provided by ZAMG"
 
 CONF_STATION_ID = 'station_id'
 
 DEFAULT_NAME = 'zamg'
 
-# Data source updates once per hour, so we do nothing if it's been less time
 MIN_TIME_BETWEEN_UPDATES = timedelta(minutes=10)
 
 SENSOR_TYPES = {
@@ -71,7 +71,7 @@ PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend({
 })
 
 
-def setup_platform(hass, config, add_devices, discovery_info=None):
+def setup_platform(hass, config, add_entities, discovery_info=None):
     """Set up the ZAMG sensor platform."""
     name = config.get(CONF_NAME)
     latitude = config.get(CONF_LATITUDE, hass.config.latitude)
@@ -91,8 +91,8 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
         _LOGGER.error("Received error from ZAMG: %s", err)
         return False
 
-    add_devices([ZamgSensor(probe, variable, name)
-                 for variable in config[CONF_MONITORED_CONDITIONS]], True)
+    add_entities([ZamgSensor(probe, variable, name)
+                  for variable in config[CONF_MONITORED_CONDITIONS]], True)
 
 
 class ZamgSensor(Entity):
@@ -133,12 +133,12 @@ class ZamgSensor(Entity):
         self.probe.update()
 
 
-class ZamgData(object):
+class ZamgData:
     """The class for handling the data retrieval."""
 
     API_URL = 'http://www.zamg.ac.at/ogd/'
     API_HEADERS = {
-        'User-Agent': '{} {}'.format('home-assistant.zamg/', __version__),
+        USER_AGENT: '{} {}'.format('home-assistant.zamg/', __version__),
     }
 
     def __init__(self, station_id):
@@ -162,8 +162,8 @@ class ZamgData(object):
                 cls.API_URL, headers=cls.API_HEADERS, timeout=15)
             response.raise_for_status()
             response.encoding = 'UTF8'
-            return csv.DictReader(response.text.splitlines(),
-                                  delimiter=';', quotechar='"')
+            return csv.DictReader(
+                response.text.splitlines(), delimiter=';', quotechar='"')
         except requests.exceptions.HTTPError:
             _LOGGER.error("While fetching data")
 
@@ -236,7 +236,7 @@ def closest_station(lat, lon, cache_dir):
     stations = zamg_stations(cache_dir)
 
     def comparable_dist(zamg_id):
-        """Calculate the psudeo-distance from lat/lon."""
+        """Calculate the pseudo-distance from lat/lon."""
         station_lat, station_lon = stations[zamg_id]
         return (lat - station_lat) ** 2 + (lon - station_lon) ** 2
 

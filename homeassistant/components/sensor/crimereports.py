@@ -1,9 +1,4 @@
-"""
-Sensor for Crime Reports.
-
-For more details about this platform, please refer to the documentation at
-https://home-assistant.io/components/sensor.crimereports/
-"""
+"""Sensor for Crime Reports."""
 from collections import defaultdict
 from datetime import timedelta
 import logging
@@ -13,7 +8,7 @@ import voluptuous as vol
 from homeassistant.components.sensor import PLATFORM_SCHEMA
 from homeassistant.const import (
     CONF_INCLUDE, CONF_EXCLUDE, CONF_NAME, CONF_LATITUDE, CONF_LONGITUDE,
-    ATTR_ATTRIBUTION, ATTR_LATITUDE, ATTR_LONGITUDE,
+    ATTR_ATTRIBUTION, ATTR_LATITUDE, ATTR_LONGITUDE, CONF_RADIUS,
     LENGTH_KILOMETERS, LENGTH_METERS)
 from homeassistant.helpers.entity import Entity
 from homeassistant.util import slugify
@@ -21,11 +16,9 @@ from homeassistant.util.distance import convert
 from homeassistant.util.dt import now
 import homeassistant.helpers.config_validation as cv
 
-REQUIREMENTS = ['crimereports==1.0.0']
+REQUIREMENTS = ['crimereports==1.0.1']
 
 _LOGGER = logging.getLogger(__name__)
-
-CONF_RADIUS = 'radius'
 
 DOMAIN = 'crimereports'
 
@@ -43,8 +36,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 })
 
 
-# pylint: disable=unused-argument
-def setup_platform(hass, config, add_devices, discovery_info=None):
+def setup_platform(hass, config, add_entities, discovery_info=None):
     """Set up the Crime Reports platform."""
     latitude = config.get(CONF_LATITUDE, hass.config.latitude)
     longitude = config.get(CONF_LONGITUDE, hass.config.longitude)
@@ -53,16 +45,16 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     include = config.get(CONF_INCLUDE)
     exclude = config.get(CONF_EXCLUDE)
 
-    add_devices([CrimeReportsSensor(
+    add_entities([CrimeReportsSensor(
         hass, name, latitude, longitude, radius, include, exclude)], True)
 
 
 class CrimeReportsSensor(Entity):
-    """Crime Reports Sensor."""
+    """Representation of a Crime Reports Sensor."""
 
     def __init__(self, hass, name, latitude, longitude, radius,
                  include, exclude):
-        """Initialize the sensor."""
+        """Initialize the Crime Reports sensor."""
         import crimereports
         self._hass = hass
         self._name = name
@@ -91,6 +83,7 @@ class CrimeReportsSensor(Entity):
         return self._attributes
 
     def _incident_event(self, incident):
+        """Fire if an event occurs."""
         data = {
             'type': incident.get('type'),
             'description': incident.get('friendly_description'),
