@@ -9,7 +9,7 @@ from homeassistant.helpers.discovery import load_platform
 
 from homeassistant.const import (
     CONF_RESOURCE, CONF_PASSWORD, CONF_SCAN_INTERVAL, TEMP_CELSIUS,
-    )
+)
 from homeassistant.helpers.event import async_track_time_interval
 from datetime import timedelta
 from datetime import datetime
@@ -45,7 +45,7 @@ ICON = {
     'speed': 'mdi:speedometer',
     'power': 'mdi:power-plug',
     'energy': 'mdi:power-plug'
-    
+
 }
 
 CONFIG_SCHEMA = vol.Schema({
@@ -59,7 +59,7 @@ CONFIG_SCHEMA = vol.Schema({
         vol.Optional(CONF_TA_PORT, default=DEFAULT_TA_PORT): cv.positive_int,
         vol.Optional(CONF_USE_WEB, default=True): cv.boolean,
         vol.Optional(CONF_USE_TA, default=False): cv.boolean
-       }),
+    }),
 }, extra=vol.ALLOW_EXTRA)
 
 
@@ -83,7 +83,7 @@ def setup(hass, config):
         return False
 
     # Initialize the BL-NET sensor
-    blnet = BLNET(resource, password=password, web_port=web_port, 
+    blnet = BLNET(resource, password=password, web_port=web_port,
                   ta_port=ta_port, use_web=use_web, use_ta=use_ta)
 
     # set the communication entity
@@ -114,9 +114,9 @@ def setup(hass, config):
     for sensor_id in data['digital']:
         disc_info = {
             'name': '{} digital {}'.format(DOMAIN, sensor_id),
-            'id': sensor_id, 
+            'id': sensor_id,
             'domain': 'digital'
-            }
+        }
         if use_web:
             component = 'switch'
         else:
@@ -155,22 +155,22 @@ class BLNETComm(object):
         """Get the latest data from BLNET and update the state."""
         data = self.blnet.fetch(self.node)
         for domain in ['analog', 'speed', 'power', 'energy']:
-                # iterate through the list and create a sensor for every value
-                for key, sensor in data.get(domain, {}).items():
-                    attributes = {} 
-                    entity_id = '{} {} {}'.format(DOMAIN, domain, key)
-                    attributes['value'] = sensor.get('value')
+            # iterate through the list and create a sensor for every value
+            for key, sensor in data.get(domain, {}).items():
+                attributes = {}
+                entity_id = '{} {} {}'.format(DOMAIN, domain, key)
+                attributes['value'] = sensor.get('value')
 
-                    attributes['unit_of_measurement'] = sensor.get('unit_of_measurement',
-                                                                   UNIT[domain])
-                    attributes['friendly_name'] = sensor.get('name')
-                    attributes['icon'] = ICON[domain]
+                attributes['unit_of_measurement'] = sensor.get('unit_of_measurement',
+                                                               UNIT[domain])
+                attributes['friendly_name'] = sensor.get('name')
+                attributes['icon'] = ICON[domain]
 
-                    self.data[entity_id] = attributes
+                self.data[entity_id] = attributes
 
         # iterate through the list and create a sensor for every value
         for key, sensor in data.get('digital', {}).items():
-            attributes = {} 
+            attributes = {}
             entity_id = '{} digital {}'.format(DOMAIN, key)
 
             attributes['friendly_name'] = sensor.get('name')
