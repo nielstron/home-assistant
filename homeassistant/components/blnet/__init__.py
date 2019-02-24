@@ -121,7 +121,7 @@ def setup(hass, config):
             component = 'switch'
         else:
             component = 'sensor'
-        load_platform(hass, 'switch', DOMAIN, disc_info, config)
+        load_platform(hass, component, DOMAIN, disc_info, config)
 
     return True
 
