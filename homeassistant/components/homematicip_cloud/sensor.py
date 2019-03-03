@@ -5,7 +5,7 @@ from homeassistant.components.homematicip_cloud import (
     DOMAIN as HMIPC_DOMAIN, HMIPC_HAPID, HomematicipGenericDevice)
 from homeassistant.const import (
     DEVICE_CLASS_HUMIDITY, DEVICE_CLASS_ILLUMINANCE, DEVICE_CLASS_TEMPERATURE,
-    TEMP_CELSIUS)
+    TEMP_CELSIUS, POWER_WATT)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,6 +64,17 @@ class HomematicipAccesspointStatus(HomematicipGenericDevice):
     def __init__(self, home):
         """Initialize access point device."""
         super().__init__(home, home)
+
+    @property
+    def device_info(self):
+        """Return device specific attributes."""
+        # Adds a sensor to the existing HAP device
+        return {
+            'identifiers': {
+                # Serial numbers of Homematic IP device
+                (HMIPC_DOMAIN, self._device.id)
+            }
+        }
 
     @property
     def icon(self):
@@ -212,4 +223,4 @@ class HomematicipPowerSensor(HomematicipGenericDevice):
     @property
     def unit_of_measurement(self):
         """Return the unit this state is expressed in."""
-        return 'W'
+        return POWER_WATT

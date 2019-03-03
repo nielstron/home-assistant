@@ -19,7 +19,7 @@ from homeassistant.helpers.typing import ConfigType, HomeAssistantType
 
 from .config_flow import SmartThingsFlowHandler  # noqa
 from .const import (
-    CONF_APP_ID, CONF_INSTALLED_APP_ID, CONF_OAUTH_CLIENT_ID,
+    CONF_APP_ID, CONF_INSTALLED_APP_ID, CONF_LOCATION_ID, CONF_OAUTH_CLIENT_ID,
     CONF_OAUTH_CLIENT_SECRET, CONF_REFRESH_TOKEN, DATA_BROKERS, DATA_MANAGER,
     DOMAIN, EVENT_BUTTON, SIGNAL_SMARTTHINGS_UPDATE, SUPPORTED_PLATFORMS,
     TOKEN_REFRESH_INTERVAL)
@@ -48,10 +48,20 @@ async def async_migrate_entry(hass: HomeAssistantType, entry: ConfigEntry):
     """
     from pysmartthings import SmartThings
 
-    # Delete the installed app
+    # Remove the installed_app, which if already removed raises a 403 error.
     api = SmartThings(async_get_clientsession(hass),
                       entry.data[CONF_ACCESS_TOKEN])
-    await api.delete_installed_app(entry.data[CONF_INSTALLED_APP_ID])
+    installed_app_id = entry.data[CONF_INSTALLED_APP_ID]
+    try:
+        await api.delete_installed_app(installed_app_id)
+    except ClientResponseError as ex:
+        if ex.status == 403:
+            _LOGGER.exception("Installed app %s has already been removed",
+                              installed_app_id)
+        else:
+            raise
+    _LOGGER.debug("Removed installed app %s", installed_app_id)
+
     # Delete the entry
     hass.async_create_task(
         hass.config_entries.async_remove(entry.entry_id))
@@ -93,6 +103,9 @@ async def async_setup_entry(hass: HomeAssistantType, entry: ConfigEntry):
         installed_app = await validate_installed_app(
             api, entry.data[CONF_INSTALLED_APP_ID])
 
+        # Get scenes
+        scenes = await async_get_entry_scenes(entry, api)
+
         # Get SmartApp token to sync subscriptions
         token = await api.generate_tokens(
             entry.data[CONF_OAUTH_CLIENT_ID],
@@ -123,7 +136,7 @@ async def async_setup_entry(hass: HomeAssistantType, entry: ConfigEntry):
             installed_app.installed_app_id, devices)
 
         # Setup device broker
-        broker = DeviceBroker(hass, entry, token, smart_app, devices)
+        broker = DeviceBroker(hass, entry, token, smart_app, devices, scenes)
         broker.connect()
         hass.data[DOMAIN][DATA_BROKERS][entry.entry_id] = broker
 
@@ -156,6 +169,20 @@ async def async_setup_entry(hass: HomeAssistantType, entry: ConfigEntry):
     return True
 
 
+async def async_get_entry_scenes(entry: ConfigEntry, api):
+    """Get the scenes within an integration."""
+    try:
+        return await api.scenes(location_id=entry.data[CONF_LOCATION_ID])
+    except ClientResponseError as ex:
+        if ex.status == 403:
+            _LOGGER.exception("Unable to load scenes for config entry '%s' "
+                              "because the access token does not have the "
+                              "required access", entry.title)
+        else:
+            raise
+    return []
+
+
 async def async_unload_entry(hass: HomeAssistantType, entry: ConfigEntry):
     """Unload a config entry."""
     broker = hass.data[DOMAIN][DATA_BROKERS].pop(entry.entry_id, None)
@@ -171,7 +198,7 @@ class DeviceBroker:
     """Manages an individual SmartThings config entry."""
 
     def __init__(self, hass: HomeAssistantType, entry: ConfigEntry,
-                 token, smart_app, devices: Iterable):
+                 token, smart_app, devices: Iterable, scenes: Iterable):
         """Create a new instance of the DeviceBroker."""
         self._hass = hass
         self._entry = entry
@@ -182,6 +209,7 @@ class DeviceBroker:
         self._regenerate_token_remove = None
         self._assignments = self._assign_capabilities(devices)
         self.devices = {device.device_id: device for device in devices}
+        self.scenes = {scene.scene_id: scene for scene in scenes}
 
     def _assign_capabilities(self, devices: Iterable):
         """Assign platforms to capabilities."""
@@ -192,6 +220,8 @@ class DeviceBroker:
             for platform_name in SUPPORTED_PLATFORMS:
                 platform = importlib.import_module(
                     '.' + platform_name, self.__module__)
+                if not hasattr(platform, 'get_capabilities'):
+                    continue
                 assigned = platform.get_capabilities(capabilities)
                 if not assigned:
                     continue
