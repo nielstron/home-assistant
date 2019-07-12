@@ -6,6 +6,8 @@ from typing import Iterable
 
 from aiohttp.client_exceptions import (
     ClientConnectionError, ClientResponseError)
+from pysmartapp.event import EVENT_TYPE_DEVICE
+from pysmartthings import Attribute, Capability, SmartThings
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ACCESS_TOKEN
@@ -25,10 +27,8 @@ from .const import (
     TOKEN_REFRESH_INTERVAL)
 from .smartapp import (
     setup_smartapp, setup_smartapp_endpoint, smartapp_sync_subscriptions,
-    validate_installed_app)
-
-REQUIREMENTS = ['pysmartapp==0.3.0', 'pysmartthings==0.6.3']
-DEPENDENCIES = ['webhook']
+    unload_smartapp_endpoint, validate_installed_app,
+    validate_webhook_requirements)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,23 +46,7 @@ async def async_migrate_entry(hass: HomeAssistantType, entry: ConfigEntry):
     integration setup again so we can properly retrieve the needed data
     elements. Force this by removing the entry and triggering a new flow.
     """
-    from pysmartthings import SmartThings
-
-    # Remove the installed_app, which if already removed raises a 403 error.
-    api = SmartThings(async_get_clientsession(hass),
-                      entry.data[CONF_ACCESS_TOKEN])
-    installed_app_id = entry.data[CONF_INSTALLED_APP_ID]
-    try:
-        await api.delete_installed_app(installed_app_id)
-    except ClientResponseError as ex:
-        if ex.status == 403:
-            _LOGGER.exception("Installed app %s has already been removed",
-                              installed_app_id)
-        else:
-            raise
-    _LOGGER.debug("Removed installed app %s", installed_app_id)
-
-    # Delete the entry
+    # Remove the entry which will invoke the callback to delete the app.
     hass.async_create_task(
         hass.config_entries.async_remove(entry.entry_id))
     # only create new flow if there isn't a pending one for SmartThings.
@@ -78,10 +62,8 @@ async def async_migrate_entry(hass: HomeAssistantType, entry: ConfigEntry):
 
 async def async_setup_entry(hass: HomeAssistantType, entry: ConfigEntry):
     """Initialize config entry which represents an installed SmartApp."""
-    from pysmartthings import SmartThings
-
-    if not hass.config.api.base_url.lower().startswith('https://'):
-        _LOGGER.warning("The 'base_url' of the 'http' component must be "
+    if not validate_webhook_requirements(hass):
+        _LOGGER.warning("The 'base_url' of the 'http' integration must be "
                         "configured and start with 'https://'")
         return False
 
@@ -194,6 +176,49 @@ async def async_unload_entry(hass: HomeAssistantType, entry: ConfigEntry):
     return all(await asyncio.gather(*tasks))
 
 
+async def async_remove_entry(
+        hass: HomeAssistantType, entry: ConfigEntry) -> None:
+    """Perform clean-up when entry is being removed."""
+    api = SmartThings(async_get_clientsession(hass),
+                      entry.data[CONF_ACCESS_TOKEN])
+
+    # Remove the installed_app, which if already removed raises a 403 error.
+    installed_app_id = entry.data[CONF_INSTALLED_APP_ID]
+    try:
+        await api.delete_installed_app(installed_app_id)
+    except ClientResponseError as ex:
+        if ex.status == 403:
+            _LOGGER.debug("Installed app %s has already been removed",
+                          installed_app_id, exc_info=True)
+        else:
+            raise
+    _LOGGER.debug("Removed installed app %s", installed_app_id)
+
+    # Remove the app if not referenced by other entries, which if already
+    # removed raises a 403 error.
+    all_entries = hass.config_entries.async_entries(DOMAIN)
+    app_id = entry.data[CONF_APP_ID]
+    app_count = sum(1 for entry in all_entries
+                    if entry.data[CONF_APP_ID] == app_id)
+    if app_count > 1:
+        _LOGGER.debug("App %s was not removed because it is in use by other"
+                      "config entries", app_id)
+        return
+    # Remove the app
+    try:
+        await api.delete_app(app_id)
+    except ClientResponseError as ex:
+        if ex.status == 403:
+            _LOGGER.debug("App %s has already been removed",
+                          app_id, exc_info=True)
+        else:
+            raise
+    _LOGGER.debug("Removed app %s", app_id)
+
+    if len(all_entries) == 1:
+        await unload_smartapp_endpoint(hass)
+
+
 class DeviceBroker:
     """Manages an individual SmartThings config entry."""
 
@@ -274,9 +299,6 @@ class DeviceBroker:
 
     async def _event_handler(self, req, resp, app):
         """Broker for incoming events."""
-        from pysmartapp.event import EVENT_TYPE_DEVICE
-        from pysmartthings import Capability, Attribute
-
         # Do not process events received from a different installed app
         # under the same parent SmartApp (valid use-scenario)
         if req.installed_app_id != self._installed_app_id:
@@ -290,7 +312,8 @@ class DeviceBroker:
             if not device:
                 continue
             device.status.apply_attribute_update(
-                evt.component_id, evt.capability, evt.attribute, evt.value)
+                evt.component_id, evt.capability, evt.attribute, evt.value,
+                data=evt.data)
 
             # Fire events for buttons
             if evt.capability == Capability.button and \
@@ -300,7 +323,8 @@ class DeviceBroker:
                     'device_id': evt.device_id,
                     'location_id': evt.location_id,
                     'value': evt.value,
-                    'name': device.label
+                    'name': device.label,
+                    'data': evt.data
                 }
                 self._hass.bus.async_fire(EVENT_BUTTON, data)
                 _LOGGER.debug("Fired button event: %s", data)
@@ -312,6 +336,7 @@ class DeviceBroker:
                     'capability': evt.capability,
                     'attribute': evt.attribute,
                     'value': evt.value,
+                    'data': evt.data
                 }
                 _LOGGER.debug("Push update received: %s", data)
 

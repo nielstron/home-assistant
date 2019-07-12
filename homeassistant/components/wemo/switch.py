@@ -12,7 +12,8 @@ from homeassistant.util import convert
 from homeassistant.const import (
     STATE_OFF, STATE_ON, STATE_STANDBY, STATE_UNKNOWN)
 
-DEPENDENCIES = ['wemo']
+from . import SUBSCRIPTION_REGISTRY, DOMAIN as WEMO_DOMAIN
+
 SCAN_INTERVAL = timedelta(seconds=10)
 
 _LOGGER = logging.getLogger(__name__)
@@ -91,6 +92,14 @@ class WemoSwitch(SwitchDevice):
     def name(self):
         """Return the name of the switch if any."""
         return self._name
+
+    @property
+    def device_info(self):
+        """Return the device info."""
+        return {
+            'name': self._name,
+            'identifiers': {(WEMO_DOMAIN, self._serialnumber)},
+        }
 
     @property
     def device_state_attributes(self):
@@ -198,7 +207,7 @@ class WemoSwitch(SwitchDevice):
         # Define inside async context so we know our event loop
         self._update_lock = asyncio.Lock()
 
-        registry = self.hass.components.wemo.SUBSCRIPTION_REGISTRY
+        registry = SUBSCRIPTION_REGISTRY
         await self.hass.async_add_job(registry.register, self.wemo)
         registry.on(self.wemo, None, self._subscription_callback)
 

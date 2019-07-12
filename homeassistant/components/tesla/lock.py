@@ -1,14 +1,12 @@
 """Support for Tesla door locks."""
 import logging
 
-from homeassistant.components.lock import ENTITY_ID_FORMAT, LockDevice
-from homeassistant.components.tesla import DOMAIN as TESLA_DOMAIN
-from homeassistant.components.tesla import TeslaDevice
+from homeassistant.components.lock import LockDevice
 from homeassistant.const import STATE_LOCKED, STATE_UNLOCKED
 
-_LOGGER = logging.getLogger(__name__)
+from . import DOMAIN as TESLA_DOMAIN, TeslaDevice
 
-DEPENDENCIES = ['tesla']
+_LOGGER = logging.getLogger(__name__)
 
 
 def setup_platform(hass, config, add_entities, discovery_info=None):
@@ -25,7 +23,6 @@ class TeslaLock(TeslaDevice, LockDevice):
         """Initialise of the lock."""
         self._state = None
         super().__init__(tesla_device, controller)
-        self.entity_id = ENTITY_ID_FORMAT.format(self.tesla_id)
 
     def lock(self, **kwargs):
         """Send the lock command."""

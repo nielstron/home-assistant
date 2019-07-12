@@ -3,12 +3,11 @@ import logging
 
 from homeassistant.components.cover import (
     ATTR_POSITION, ATTR_TILT_POSITION, CoverDevice)
-from homeassistant.components.homematic import ATTR_DISCOVER_DEVICES, HMDevice
 from homeassistant.const import STATE_UNKNOWN
 
-_LOGGER = logging.getLogger(__name__)
+from . import ATTR_DISCOVER_DEVICES, HMDevice
 
-DEPENDENCIES = ['homematic']
+_LOGGER = logging.getLogger(__name__)
 
 
 def setup_platform(hass, config, add_entities, discovery_info=None):
@@ -49,6 +48,7 @@ class HMCover(HMDevice, CoverDevice):
         """Return if the cover is closed."""
         if self.current_cover_position is not None:
             return self.current_cover_position == 0
+        return None
 
     def open_cover(self, **kwargs):
         """Open the cover."""

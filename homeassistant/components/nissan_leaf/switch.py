@@ -1,13 +1,11 @@
 """Charge and Climate Control Support for the Nissan Leaf."""
 import logging
 
-from homeassistant.components.nissan_leaf import (
-    DATA_CLIMATE, DATA_LEAF, LeafEntity)
 from homeassistant.helpers.entity import ToggleEntity
 
-_LOGGER = logging.getLogger(__name__)
+from . import DATA_CLIMATE, DATA_LEAF, LeafEntity
 
-DEPENDENCIES = ['nissan_leaf']
+_LOGGER = logging.getLogger(__name__)
 
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
@@ -34,7 +32,7 @@ class LeafClimateSwitch(LeafEntity, ToggleEntity):
     def log_registration(self):
         """Log registration."""
         _LOGGER.debug(
-            "Registered LeafClimateSwitch component with HASS for VIN %s",
+            "Registered LeafClimateSwitch integration with HASS for VIN %s",
             self.car.leaf.vin)
 
     @property

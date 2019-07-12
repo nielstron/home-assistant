@@ -1,19 +1,19 @@
 """Tests for the SmartThings config flow module."""
-from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from aiohttp import ClientResponseError
+from asynctest import Mock, patch
 from pysmartthings import APIResponseError
 
 from homeassistant import data_entry_flow
+from homeassistant.components import cloud
+from homeassistant.components.smartthings import smartapp
 from homeassistant.components.smartthings.config_flow import (
     SmartThingsFlowHandler)
 from homeassistant.components.smartthings.const import (
     CONF_INSTALLED_APP_ID, CONF_INSTALLED_APPS, CONF_LOCATION_ID,
     CONF_REFRESH_TOKEN, DOMAIN)
 from homeassistant.config_entries import ConfigEntry
-
-from tests.common import mock_coro
 
 
 async def test_step_user(hass):
@@ -41,7 +41,7 @@ async def test_base_url_not_https(hass):
     hass.config.api.base_url = 'http://0.0.0.0'
     flow = SmartThingsFlowHandler()
     flow.hass = hass
-    result = await flow.async_step_import()
+    result = await flow.async_step_user({'access_token': str(uuid4())})
 
     assert result['type'] == data_entry_flow.RESULT_TYPE_FORM
     assert result['step_id'] == 'user'
@@ -82,8 +82,8 @@ async def test_token_unauthorized(hass, smartthings_mock):
     flow = SmartThingsFlowHandler()
     flow.hass = hass
 
-    smartthings_mock.return_value.apps.return_value = mock_coro(
-        exception=ClientResponseError(None, None, status=401))
+    smartthings_mock.apps.side_effect = \
+        ClientResponseError(None, None, status=401)
 
     result = await flow.async_step_user({'access_token': str(uuid4())})
 
@@ -97,8 +97,8 @@ async def test_token_forbidden(hass, smartthings_mock):
     flow = SmartThingsFlowHandler()
     flow.hass = hass
 
-    smartthings_mock.return_value.apps.return_value = mock_coro(
-        exception=ClientResponseError(None, None, status=403))
+    smartthings_mock.apps.side_effect = \
+        ClientResponseError(None, None, status=403)
 
     result = await flow.async_step_user({'access_token': str(uuid4())})
 
@@ -116,8 +116,7 @@ async def test_webhook_error(hass, smartthings_mock):
     error = APIResponseError(None, None, data=data, status=422)
     error.is_target_error = Mock(return_value=True)
 
-    smartthings_mock.return_value.apps.return_value = mock_coro(
-        exception=error)
+    smartthings_mock.apps.side_effect = error
 
     result = await flow.async_step_user({'access_token': str(uuid4())})
 
@@ -134,8 +133,7 @@ async def test_api_error(hass, smartthings_mock):
     data = {'error': {}}
     error = APIResponseError(None, None, data=data, status=400)
 
-    smartthings_mock.return_value.apps.return_value = mock_coro(
-        exception=error)
+    smartthings_mock.apps.side_effect = error
 
     result = await flow.async_step_user({'access_token': str(uuid4())})
 
@@ -149,8 +147,8 @@ async def test_unknown_api_error(hass, smartthings_mock):
     flow = SmartThingsFlowHandler()
     flow.hass = hass
 
-    smartthings_mock.return_value.apps.return_value = mock_coro(
-        exception=ClientResponseError(None, None, status=404))
+    smartthings_mock.apps.side_effect = \
+        ClientResponseError(None, None, status=404)
 
     result = await flow.async_step_user({'access_token': str(uuid4())})
 
@@ -164,8 +162,7 @@ async def test_unknown_error(hass, smartthings_mock):
     flow = SmartThingsFlowHandler()
     flow.hass = hass
 
-    smartthings_mock.return_value.apps.return_value = mock_coro(
-        exception=Exception('Unknown error'))
+    smartthings_mock.apps.side_effect = Exception('Unknown error')
 
     result = await flow.async_step_user({'access_token': str(uuid4())})
 
@@ -180,17 +177,38 @@ async def test_app_created_then_show_wait_form(
     flow = SmartThingsFlowHandler()
     flow.hass = hass
 
-    smartthings = smartthings_mock.return_value
-    smartthings.apps.return_value = mock_coro(return_value=[])
-    smartthings.create_app.return_value = \
-        mock_coro(return_value=(app, app_oauth_client))
-    smartthings.update_app_settings.return_value = mock_coro()
-    smartthings.update_app_oauth.return_value = mock_coro()
+    smartthings_mock.apps.return_value = []
+    smartthings_mock.create_app.return_value = (app, app_oauth_client)
 
     result = await flow.async_step_user({'access_token': str(uuid4())})
 
     assert result['type'] == data_entry_flow.RESULT_TYPE_FORM
     assert result['step_id'] == 'wait_install'
+
+
+async def test_cloudhook_app_created_then_show_wait_form(
+        hass, app, app_oauth_client, smartthings_mock):
+    """Test SmartApp is created with a cloudhoko and shows wait form."""
+    # Unload the endpoint so we can reload it under the cloud.
+    await smartapp.unload_smartapp_endpoint(hass)
+
+    with patch.object(cloud, 'async_active_subscription', return_value=True), \
+        patch.object(
+                cloud, 'async_create_cloudhook',
+                return_value='http://cloud.test') as mock_create_cloudhook:
+
+        await smartapp.setup_smartapp_endpoint(hass)
+
+        flow = SmartThingsFlowHandler()
+        flow.hass = hass
+        smartthings_mock.apps.return_value = []
+        smartthings_mock.create_app.return_value = (app, app_oauth_client)
+
+        result = await flow.async_step_user({'access_token': str(uuid4())})
+
+        assert result['type'] == data_entry_flow.RESULT_TYPE_FORM
+        assert result['step_id'] == 'wait_install'
+        assert mock_create_cloudhook.call_count == 1
 
 
 async def test_app_updated_then_show_wait_form(
@@ -199,10 +217,8 @@ async def test_app_updated_then_show_wait_form(
     flow = SmartThingsFlowHandler()
     flow.hass = hass
 
-    api = smartthings_mock.return_value
-    api.apps.return_value = mock_coro(return_value=[app])
-    api.generate_app_oauth.return_value = \
-        mock_coro(return_value=app_oauth_client)
+    smartthings_mock.apps.return_value = [app]
+    smartthings_mock.generate_app_oauth.return_value = app_oauth_client
 
     result = await flow.async_step_user({'access_token': str(uuid4())})
 
@@ -241,7 +257,7 @@ async def test_config_entry_created_when_installed(
     flow.hass = hass
     flow.access_token = str(uuid4())
     flow.app_id = installed_app.app_id
-    flow.api = smartthings_mock.return_value
+    flow.api = smartthings_mock
     flow.oauth_client_id = str(uuid4())
     flow.oauth_client_secret = str(uuid4())
     data = {
@@ -273,7 +289,7 @@ async def test_multiple_config_entry_created_when_installed(
     flow.hass = hass
     flow.access_token = str(uuid4())
     flow.app_id = app.app_id
-    flow.api = smartthings_mock.return_value
+    flow.api = smartthings_mock
     flow.oauth_client_id = str(uuid4())
     flow.oauth_client_secret = str(uuid4())
     for installed_app in installed_apps:

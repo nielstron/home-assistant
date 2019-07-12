@@ -1,14 +1,13 @@
 """Support for the Hive devices."""
 import logging
 
+from pyhiveapi import Pyhiveapi
 import voluptuous as vol
 
 from homeassistant.const import (
     CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME)
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.discovery import load_platform
-
-REQUIREMENTS = ['pyhiveapi==0.2.17']
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,8 +46,6 @@ class HiveSession:
 
 def setup(hass, config):
     """Set up the Hive Component."""
-    from pyhiveapi import Pyhiveapi
-
     session = HiveSession()
     session.core = Pyhiveapi()
 

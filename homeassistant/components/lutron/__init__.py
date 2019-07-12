@@ -10,8 +10,6 @@ from homeassistant.helpers import discovery
 from homeassistant.helpers.entity import Entity
 from homeassistant.util import slugify
 
-REQUIREMENTS = ['pylutron==0.2.0']
-
 DOMAIN = 'lutron'
 
 _LOGGER = logging.getLogger(__name__)
@@ -124,7 +122,8 @@ class LutronButton:
         """Register callback for activity on the button."""
         name = '{}: {}'.format(keypad.name, button.name)
         self._hass = hass
-        self._has_release_event = 'RaiseLower' in button.button_type
+        self._has_release_event = (button.button_type is not None and
+                                   'RaiseLower' in button.button_type)
         self._id = slugify(name)
         self._event = 'lutron_event'
 

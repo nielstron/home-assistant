@@ -11,8 +11,6 @@ from homeassistant.helpers import discovery
 from homeassistant.helpers.entity import Entity
 from homeassistant.util import slugify
 
-REQUIREMENTS = ['teslajsonpy==0.0.23']
-
 DOMAIN = 'tesla'
 
 _LOGGER = logging.getLogger(__name__)
@@ -100,6 +98,11 @@ class TeslaDevice(Entity):
     def name(self):
         """Return the name of the device."""
         return self._name
+
+    @property
+    def unique_id(self) -> str:
+        """Return a unique ID."""
+        return self.tesla_id
 
     @property
     def should_poll(self):

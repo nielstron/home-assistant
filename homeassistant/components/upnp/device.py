@@ -23,13 +23,17 @@ class Device:
     async def async_discover(cls, hass: HomeAssistantType):
         """Discovery UPNP/IGD devices."""
         _LOGGER.debug('Discovering UPnP/IGD devices')
-        local_ip = hass.data[DOMAIN]['config'].get(CONF_LOCAL_IP)
+        local_ip = None
+        if DOMAIN in hass.data and \
+           'config' in hass.data[DOMAIN]:
+            local_ip = hass.data[DOMAIN]['config'].get(CONF_LOCAL_IP)
         if local_ip:
             local_ip = IPv4Address(local_ip)
 
         # discover devices
         from async_upnp_client.profiles.igd import IgdDevice
-        discovery_infos = await IgdDevice.async_search(source_ip=local_ip)
+        discovery_infos = await IgdDevice.async_search(source_ip=local_ip,
+                                                       timeout=10)
 
         # add extra info and store devices
         devices = []

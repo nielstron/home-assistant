@@ -1,13 +1,11 @@
 """Support for Tesla binary sensor."""
 import logging
 
-from homeassistant.components.binary_sensor import (
-    BinarySensorDevice, ENTITY_ID_FORMAT)
-from homeassistant.components.tesla import DOMAIN as TESLA_DOMAIN, TeslaDevice
+from homeassistant.components.binary_sensor import BinarySensorDevice
+
+from . import DOMAIN as TESLA_DOMAIN, TeslaDevice
 
 _LOGGER = logging.getLogger(__name__)
-
-DEPENDENCIES = ['tesla']
 
 
 def setup_platform(hass, config, add_entities, discovery_info=None):
@@ -26,7 +24,6 @@ class TeslaBinarySensor(TeslaDevice, BinarySensorDevice):
         """Initialise of a Tesla binary sensor."""
         super().__init__(tesla_device, controller)
         self._state = False
-        self.entity_id = ENTITY_ID_FORMAT.format(self.tesla_id)
         self._sensor_type = sensor_type
 
     @property

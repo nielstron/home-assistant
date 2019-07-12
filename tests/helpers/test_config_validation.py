@@ -1,14 +1,15 @@
 """Test config validators."""
-from datetime import timedelta, datetime, date
+from datetime import date, datetime, timedelta
 import enum
 import os
 from socket import _GLOBAL_DEFAULT_TIMEOUT
 from unittest.mock import Mock, patch
+import uuid
 
-import homeassistant
 import pytest
 import voluptuous as vol
 
+import homeassistant
 import homeassistant.helpers.config_validation as cv
 
 
@@ -16,11 +17,14 @@ def test_boolean():
     """Test boolean validation."""
     schema = vol.Schema(cv.boolean)
 
-    for value in ('T', 'negative', 'lock'):
+    for value in (
+            None, 'T', 'negative', 'lock', 'tr  ue',
+            [], [1, 2], {'one': 'two'}, test_boolean):
         with pytest.raises(vol.MultipleInvalid):
             schema(value)
 
-    for value in ('true', 'On', '1', 'YES', 'enable', 1, True):
+    for value in ('true', 'On', '1', 'YES', '   true  ',
+                  'enable', 1, 50, True, 0.1):
         assert schema(value)
 
     for value in ('false', 'Off', '0', 'NO', 'disable', 0, False):
@@ -288,6 +292,11 @@ def test_time_period():
     assert timedelta(seconds=180) == schema('180')
     assert timedelta(hours=23, minutes=59) == schema('23:59')
     assert -1 * timedelta(hours=1, minutes=15) == schema('-1:15')
+
+
+def test_remove_falsy():
+    """Test remove falsy."""
+    assert cv.remove_falsy([0, None, 1, "1", {}, [], ""]) == [1, "1"]
 
 
 def test_service():
@@ -824,6 +833,16 @@ def test_deprecated_with_replacement_key_invalidation_version_default(
             "invalid in version 0.1.0") == str(exc_info.value)
 
 
+def test_deprecated_cant_find_module():
+    """Test if the current module cannot be inspected."""
+    with patch('inspect.getmodule', return_value=None):
+        # This used to raise.
+        cv.deprecated(
+            'mars', replacement_key='jupiter', invalidation_version='1.0.0',
+            default=False
+        )
+
+
 def test_key_dependency():
     """Test key_dependency validator."""
     schema = vol.Schema(cv.key_dependency('beer', 'soda'))
@@ -907,7 +926,7 @@ def test_matches_regex():
         schema("  nrtd   ")
 
     test_str = "This is a test including uiae."
-    assert (schema(test_str) == test_str)
+    assert schema(test_str) == test_str
 
 
 def test_is_regex():
@@ -937,29 +956,22 @@ def test_comp_entity_ids():
             schema(invalid)
 
 
-def test_schema_with_slug_keys_allows_old_slugs(caplog):
-    """Test schema with slug keys allowing old slugs."""
-    schema = cv.schema_with_slug_keys(str)
+def test_uuid4_hex(caplog):
+    """Test uuid validation."""
+    schema = vol.Schema(cv.uuid4_hex)
 
-    with patch.dict(cv.INVALID_SLUGS_FOUND, clear=True):
-        for value in ('_world', 'wow__yeah'):
-            caplog.clear()
-            # Will raise if not allowing old slugs
-            schema({value: 'yo'})
-            assert "Found invalid slug {}".format(value) in caplog.text
-
-        assert len(cv.INVALID_SLUGS_FOUND) == 2
-
-
-def test_entity_id_allow_old_validation(caplog):
-    """Test schema allowing old entity_ids."""
-    schema = vol.Schema(cv.entity_id)
-
-    with patch.dict(cv.INVALID_ENTITY_IDS_FOUND, clear=True):
-        for value in ('hello.__world', 'great.wow__yeah'):
-            caplog.clear()
-            # Will raise if not allowing old entity ID
+    for value in ['Not a hex string', '0', 0]:
+        with pytest.raises(vol.Invalid):
             schema(value)
-            assert "Found invalid entity_id {}".format(value) in caplog.text
 
-        assert len(cv.INVALID_ENTITY_IDS_FOUND) == 2
+    with pytest.raises(vol.Invalid):
+        # the 13th char should be 4
+        schema('a03d31b22eee1acc9b90eec40be6ed23')
+
+    with pytest.raises(vol.Invalid):
+        # the 17th char should be 8-a
+        schema('a03d31b22eee4acc7b90eec40be6ed23')
+
+    _hex = uuid.uuid4().hex
+    assert schema(_hex) == _hex
+    assert schema(_hex.upper()) == _hex

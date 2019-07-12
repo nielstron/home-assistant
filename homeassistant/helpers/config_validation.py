@@ -6,35 +6,29 @@ import re
 from datetime import (timedelta, datetime as datetime_sys,
                       time as time_sys, date as date_sys)
 from socket import _GLOBAL_DEFAULT_TIMEOUT
+from numbers import Number
 from typing import Any, Union, TypeVar, Callable, Sequence, Dict, Optional
 from urllib.parse import urlparse
+from uuid import UUID
 
 import voluptuous as vol
 from pkg_resources import parse_version
 
 import homeassistant.util.dt as dt_util
 from homeassistant.const import (
-    CONF_PLATFORM, CONF_SCAN_INTERVAL, TEMP_CELSIUS, TEMP_FAHRENHEIT,
-    CONF_ALIAS, CONF_ENTITY_ID, CONF_VALUE_TEMPLATE, WEEKDAYS,
-    CONF_CONDITION, CONF_BELOW, CONF_ABOVE, CONF_TIMEOUT, SUN_EVENT_SUNSET,
-    SUN_EVENT_SUNRISE, CONF_UNIT_SYSTEM_IMPERIAL, CONF_UNIT_SYSTEM_METRIC,
-    ENTITY_MATCH_ALL, CONF_ENTITY_NAMESPACE, __version__)
+    CONF_ABOVE, CONF_ALIAS, CONF_BELOW, CONF_CONDITION, CONF_ENTITY_ID,
+    CONF_ENTITY_NAMESPACE, CONF_PLATFORM, CONF_SCAN_INTERVAL,
+    CONF_UNIT_SYSTEM_IMPERIAL, CONF_UNIT_SYSTEM_METRIC, CONF_VALUE_TEMPLATE,
+    CONF_TIMEOUT, ENTITY_MATCH_ALL, SUN_EVENT_SUNRISE, SUN_EVENT_SUNSET,
+    TEMP_CELSIUS, TEMP_FAHRENHEIT, WEEKDAYS, __version__)
 from homeassistant.core import valid_entity_id, split_entity_id
 from homeassistant.exceptions import TemplateError
-from homeassistant.helpers import template as template_helper
 from homeassistant.helpers.logging import KeywordStyleAdapter
 from homeassistant.util import slugify as util_slugify
 
 # pylint: disable=invalid-name
 
 TIME_PERIOD_ERROR = "offset {} should be format 'HH:MM' or 'HH:MM:SS'"
-OLD_SLUG_VALIDATION = r'^[a-z0-9_]+$'
-OLD_ENTITY_ID_VALIDATION = r"^(\w+)\.(\w+)$"
-# Keep track of invalid slugs and entity ids found so we can create a
-# persistent notification. Rare temporary exception to use a global.
-INVALID_SLUGS_FOUND = {}
-INVALID_ENTITY_IDS_FOUND = {}
-INVALID_EXTRA_KEYS_FOUND = []
 
 
 # Home Assistant types
@@ -88,14 +82,17 @@ def has_at_most_one_key(*keys: str) -> Callable:
 
 def boolean(value: Any) -> bool:
     """Validate and coerce a boolean value."""
+    if isinstance(value, bool):
+        return value
     if isinstance(value, str):
-        value = value.lower()
+        value = value.lower().strip()
         if value in ('1', 'true', 'yes', 'on', 'enable'):
             return True
         if value in ('0', 'false', 'no', 'off', 'disable'):
             return False
-        raise vol.Invalid('invalid boolean value {}'.format(value))
-    return bool(value)
+    elif isinstance(value, Number):
+        return value != 0
+    raise vol.Invalid('invalid boolean value {}'.format(value))
 
 
 def isdevice(value):
@@ -174,17 +171,6 @@ def entity_id(value: Any) -> str:
     """Validate Entity ID."""
     value = string(value).lower()
     if valid_entity_id(value):
-        return value
-    if re.match(OLD_ENTITY_ID_VALIDATION, value):
-        # To ease the breaking change, we allow old slugs for now
-        # Remove after 0.94 or 1.0
-        fixed = '.'.join(util_slugify(part) for part in value.split('.', 1))
-        INVALID_ENTITY_IDS_FOUND[value] = fixed
-        logging.getLogger(__name__).warning(
-            "Found invalid entity_id %s, please update with %s. This "
-            "will become a breaking change.",
-            value, fixed
-        )
         return value
 
     raise vol.Invalid('Entity ID {} is an invalid entity id'.format(value))
@@ -348,6 +334,11 @@ def positive_timedelta(value: timedelta) -> timedelta:
     return value
 
 
+def remove_falsy(value: Sequence[T]) -> Sequence[T]:
+    """Remove falsy values from a list."""
+    return [v for v in value if v]
+
+
 def service(value):
     """Validate service."""
     # Services use same format as entities so we can use same helper.
@@ -371,21 +362,7 @@ def schema_with_slug_keys(value_schema: Union[T, Callable]) -> Callable:
             raise vol.Invalid('expected dictionary')
 
         for key in value.keys():
-            try:
-                slug(key)
-            except vol.Invalid:
-                # To ease the breaking change, we allow old slugs for now
-                # Remove after 0.94 or 1.0
-                if re.match(OLD_SLUG_VALIDATION, key):
-                    fixed = util_slugify(key)
-                    INVALID_SLUGS_FOUND[key] = fixed
-                    logging.getLogger(__name__).warning(
-                        "Found invalid slug %s, please update with %s. This "
-                        "will be come a breaking change.",
-                        key, fixed
-                    )
-                else:
-                    raise
+            slug(key)
 
         return schema(value)
     return verify
@@ -438,6 +415,8 @@ unit_system = vol.All(vol.Lower, vol.Any(CONF_UNIT_SYSTEM_METRIC,
 
 def template(value):
     """Validate a jinja2 template."""
+    from homeassistant.helpers import template as template_helper
+
     if value is None:
         raise vol.Invalid('template value is None')
     if isinstance(value, (list, dict, template_helper.Template)):
@@ -532,6 +511,20 @@ def x10_address(value):
     return str(value).lower()
 
 
+def uuid4_hex(value):
+    """Validate a v4 UUID in hex format."""
+    try:
+        result = UUID(value, version=4)
+    except (ValueError, AttributeError, TypeError) as error:
+        raise vol.Invalid('Invalid Version4 UUID', error_message=str(error))
+
+    if result.hex != value.lower():
+        # UUID() will create a uuid4 if input is invalid
+        raise vol.Invalid('Invalid Version4 UUID')
+
+    return result.hex
+
+
 def ensure_list_csv(value: Any) -> Sequence:
     """Ensure that input is a list or make one from comma-separated string."""
     if isinstance(value, str):
@@ -556,7 +549,13 @@ def deprecated(key: str,
         - Once the invalidation_version is crossed, raises vol.Invalid if key
         is detected
     """
-    module_name = inspect.getmodule(inspect.stack()[1][0]).__name__
+    module = inspect.getmodule(inspect.stack()[1][0])
+    if module is not None:
+        module_name = module.__name__
+    else:
+        # Unclear when it is None, but it happens, so let's guard.
+        # https://github.com/home-assistant/home-assistant/issues/24982
+        module_name = __name__
 
     if replacement_key and invalidation_version:
         warning = ("The '{key}' option (with value '{value}') is"
@@ -634,61 +633,7 @@ def key_dependency(key, dependency):
 
 
 # Schemas
-class HASchema(vol.Schema):
-    """Schema class that allows us to mark PREVENT_EXTRA errors as warnings."""
-
-    def __call__(self, data):
-        """Override __call__ to mark PREVENT_EXTRA as warning."""
-        try:
-            return super().__call__(data)
-        except vol.Invalid as orig_err:
-            if self.extra != vol.PREVENT_EXTRA:
-                raise
-
-            # orig_error is of type vol.MultipleInvalid (see super __call__)
-            assert isinstance(orig_err, vol.MultipleInvalid)
-            # pylint: disable=no-member
-            # If it fails with PREVENT_EXTRA, try with ALLOW_EXTRA
-            self.extra = vol.ALLOW_EXTRA
-            # In case it still fails the following will raise
-            try:
-                validated = super().__call__(data)
-            finally:
-                self.extra = vol.PREVENT_EXTRA
-
-            # This is a legacy config, print warning
-            extra_key_errs = [err for err in orig_err.errors
-                              if err.error_message == 'extra keys not allowed']
-            if extra_key_errs:
-                msg = "Your configuration contains extra keys " \
-                      "that the platform does not support.\n" \
-                      "Please remove "
-                submsg = ', '.join('[{}]'.format(err.path[-1]) for err in
-                                   extra_key_errs)
-                submsg += '. '
-                if hasattr(data, '__config_file__'):
-                    submsg += " (See {}, line {}). ".format(
-                        data.__config_file__, data.__line__)
-                msg += submsg
-                logging.getLogger(__name__).warning(msg)
-                INVALID_EXTRA_KEYS_FOUND.append(submsg)
-            else:
-                # This should not happen (all errors should be extra key
-                # errors). Let's raise the original error anyway.
-                raise orig_err
-
-            # Return legacy validated config
-            return validated
-
-    def extend(self, schema, required=None, extra=None):
-        """Extend this schema and convert it to HASchema if necessary."""
-        ret = super().extend(schema, required=required, extra=extra)
-        if extra is not None:
-            return ret
-        return HASchema(ret.schema, required=required, extra=self.extra)
-
-
-PLATFORM_SCHEMA = HASchema({
+PLATFORM_SCHEMA = vol.Schema({
     vol.Required(CONF_PLATFORM): string,
     vol.Optional(CONF_ENTITY_NAMESPACE): string,
     vol.Optional(CONF_SCAN_INTERVAL): time_period

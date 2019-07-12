@@ -9,18 +9,13 @@ from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from . import ZigbeeChannel
 from ..helpers import bind_cluster
-from ..const import SIGNAL_ATTR_UPDATED, ZONE_CHANNEL
+from ..const import SIGNAL_ATTR_UPDATED
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class IASZoneChannel(ZigbeeChannel):
     """Channel for the IASZone Zigbee cluster."""
-
-    def __init__(self, cluster, device):
-        """Initialize IASZoneChannel."""
-        super().__init__(cluster, device)
-        self.name = ZONE_CHANNEL
 
     @callback
     def cluster_command(self, tsn, command_id, args):
@@ -40,6 +35,9 @@ class IASZoneChannel(ZigbeeChannel):
 
     async def async_configure(self):
         """Configure IAS device."""
+        # Xiaomi devices don't need this and it disrupts pairing
+        if self._zha_device.manufacturer == 'LUMI':
+            return
         from zigpy.exceptions import DeliveryError
         _LOGGER.debug("%s: started IASZoneChannel configuration",
                       self._unique_id)

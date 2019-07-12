@@ -12,8 +12,6 @@ from homeassistant.const import (
 from homeassistant.helpers import discovery
 import homeassistant.helpers.config_validation as cv
 
-REQUIREMENTS = ['pykira==0.1.1']
-
 DOMAIN = 'kira'
 
 _LOGGER = logging.getLogger(__name__)
@@ -62,7 +60,7 @@ def load_codes(path):
     codes = []
     if os.path.exists(path):
         with open(path) as code_file:
-            data = yaml.load(code_file) or []
+            data = yaml.safe_load(code_file) or []
         for code in data:
             try:
                 codes.append(CODE_SCHEMA(code))

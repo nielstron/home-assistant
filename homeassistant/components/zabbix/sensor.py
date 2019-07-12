@@ -11,8 +11,6 @@ from homeassistant.helpers.entity import Entity
 
 _LOGGER = logging.getLogger(__name__)
 
-DEPENDENCIES = ['zabbix']
-
 _CONF_TRIGGERS = 'triggers'
 _CONF_HOSTIDS = 'hostids'
 _CONF_INDIVIDUAL = 'individual'
@@ -37,7 +35,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
 
     zapi = hass.data[zabbix.DOMAIN]
     if not zapi:
-        _LOGGER.error("zapi is None. Zabbix component hasn't been loaded?")
+        _LOGGER.error("zapi is None. Zabbix integration hasn't been loaded?")
         return False
 
     _LOGGER.info("Connected to Zabbix API Version %s", zapi.api_version())

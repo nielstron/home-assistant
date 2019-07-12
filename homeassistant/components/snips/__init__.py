@@ -10,8 +10,6 @@ from homeassistant.helpers import intent, config_validation as cv
 from homeassistant.components import mqtt
 
 DOMAIN = 'snips'
-DEPENDENCIES = ['mqtt']
-
 CONF_INTENTS = 'intents'
 CONF_ACTION = 'action'
 CONF_FEEDBACK = 'feedback_sounds'
@@ -95,14 +93,14 @@ async def async_setup(hass, config):
     if CONF_FEEDBACK in config[DOMAIN]:
         async_set_feedback(None, config[DOMAIN][CONF_FEEDBACK])
 
-    async def message_received(topic, payload, qos):
+    async def message_received(msg):
         """Handle new messages on MQTT."""
-        _LOGGER.debug("New intent: %s", payload)
+        _LOGGER.debug("New intent: %s", msg.payload)
 
         try:
-            request = json.loads(payload)
+            request = json.loads(msg.payload)
         except TypeError:
-            _LOGGER.error('Received invalid JSON: %s', payload)
+            _LOGGER.error('Received invalid JSON: %s', msg.payload)
             return
 
         if (request['intent']['confidenceScore']

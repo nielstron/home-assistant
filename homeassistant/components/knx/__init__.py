@@ -11,8 +11,6 @@ import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.event import async_track_state_change
 from homeassistant.helpers.script import Script
 
-REQUIREMENTS = ['xknx==0.9.4']
-
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "knx"
@@ -25,6 +23,7 @@ CONF_KNX_LOCAL_IP = "local_ip"
 CONF_KNX_FIRE_EVENT = "fire_event"
 CONF_KNX_FIRE_EVENT_FILTER = "fire_event_filter"
 CONF_KNX_STATE_UPDATER = "state_updater"
+CONF_KNX_RATE_LIMIT = "rate_limit"
 CONF_KNX_EXPOSE = "expose"
 CONF_KNX_EXPOSE_TYPE = "type"
 CONF_KNX_EXPOSE_ADDRESS = "address"
@@ -37,12 +36,12 @@ ATTR_DISCOVER_DEVICES = 'devices'
 
 TUNNELING_SCHEMA = vol.Schema({
     vol.Required(CONF_HOST): cv.string,
-    vol.Required(CONF_KNX_LOCAL_IP): cv.string,
+    vol.Optional(CONF_KNX_LOCAL_IP): cv.string,
     vol.Optional(CONF_PORT): cv.port,
 })
 
 ROUTING_SCHEMA = vol.Schema({
-    vol.Required(CONF_KNX_LOCAL_IP): cv.string,
+    vol.Optional(CONF_KNX_LOCAL_IP): cv.string,
 })
 
 EXPOSE_SCHEMA = vol.Schema({
@@ -62,6 +61,8 @@ CONFIG_SCHEMA = vol.Schema({
         vol.Inclusive(CONF_KNX_FIRE_EVENT_FILTER, 'fire_ev'):
             vol.All(cv.ensure_list, [cv.string]),
         vol.Optional(CONF_KNX_STATE_UPDATER, default=True): cv.boolean,
+        vol.Optional(CONF_KNX_RATE_LIMIT, default=20):
+            vol.All(vol.Coerce(int), vol.Range(min=1, max=100)),
         vol.Optional(CONF_KNX_EXPOSE):
             vol.All(
                 cv.ensure_list,
@@ -138,7 +139,8 @@ class KNXModule:
     def init_xknx(self):
         """Initialize of KNX object."""
         from xknx import XKNX
-        self.xknx = XKNX(config=self.config_file(), loop=self.hass.loop)
+        self.xknx = XKNX(config=self.config_file(), loop=self.hass.loop,
+                         rate_limit=self.config[DOMAIN][CONF_KNX_RATE_LIMIT])
 
     async def start(self):
         """Start KNX object. Connect to tunneling or Routing device."""
@@ -331,4 +333,13 @@ class KNXExposeSensor:
         """Handle entity change."""
         if new_state is None:
             return
-        await self.device.set(float(new_state.state))
+        if new_state.state == "unknown":
+            return
+
+        if self.type == 'binary':
+            if new_state.state == "on":
+                await self.device.set(True)
+            elif new_state.state == "off":
+                await self.device.set(False)
+        else:
+            await self.device.set(new_state.state)

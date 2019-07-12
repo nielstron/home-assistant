@@ -12,8 +12,6 @@ from homeassistant.helpers.dispatcher import (
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import track_time_interval
 
-REQUIREMENTS = ['tuyapy==0.1.3']
-
 _LOGGER = logging.getLogger(__name__)
 
 CONF_COUNTRYCODE = 'country_code'
@@ -48,7 +46,7 @@ CONFIG_SCHEMA = vol.Schema({
 
 def setup(hass, config):
     """Set up Tuya Component."""
-    from tuyapy import TuyaApi
+    from tuyaha import TuyaApi
 
     tuya = TuyaApi()
     username = config[DOMAIN][CONF_USERNAME]

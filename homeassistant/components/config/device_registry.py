@@ -7,8 +7,6 @@ from homeassistant.components.websocket_api.decorators import (
 from homeassistant.core import callback
 from homeassistant.helpers.device_registry import async_get_registry
 
-DEPENDENCIES = ['websocket_api']
-
 WS_TYPE_LIST = 'config/device_registry/list'
 SCHEMA_WS_LIST = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend({
     vol.Required('type'): WS_TYPE_LIST,
@@ -71,7 +69,7 @@ def _entry_dict(entry):
         'name': entry.name,
         'sw_version': entry.sw_version,
         'id': entry.id,
-        'hub_device_id': entry.hub_device_id,
+        'via_device_id': entry.via_device_id,
         'area_id': entry.area_id,
         'name_by_user': entry.name_by_user,
     }

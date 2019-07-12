@@ -1,15 +1,11 @@
 """Support for Nest Thermostat sensors."""
 import logging
 
-from homeassistant.components.climate.const import (
-    STATE_COOL, STATE_HEAT)
-from homeassistant.components.nest import (
-    DATA_NEST, DATA_NEST_CONFIG, CONF_SENSORS, NestSensorDevice)
 from homeassistant.const import (
-    TEMP_CELSIUS, TEMP_FAHRENHEIT, CONF_MONITORED_CONDITIONS,
-    DEVICE_CLASS_TEMPERATURE, DEVICE_CLASS_HUMIDITY, STATE_OFF)
+    CONF_MONITORED_CONDITIONS, DEVICE_CLASS_HUMIDITY, DEVICE_CLASS_TEMPERATURE,
+    STATE_OFF, TEMP_CELSIUS, TEMP_FAHRENHEIT)
 
-DEPENDENCIES = ['nest']
+from . import CONF_SENSORS, DATA_NEST, DATA_NEST_CONFIG, NestSensorDevice
 
 SENSOR_TYPES = ['humidity', 'operation_mode', 'hvac_state']
 
@@ -22,6 +18,9 @@ PROTECT_SENSOR_TYPES = ['co_status',
                         'color_status']
 
 STRUCTURE_SENSOR_TYPES = ['eta']
+
+STATE_HEAT = 'heat'
+STATE_COOL = 'cool'
 
 # security_state is structure level sensor, but only meaningful when
 # Nest Cam exist
@@ -80,7 +79,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
             if variable in DEPRECATED_WEATHER_VARS:
                 wstr = ("Nest no longer provides weather data like %s. See "
                         "https://home-assistant.io/components/#weather "
-                        "for a list of other weather components to use." %
+                        "for a list of other weather integrations to use." %
                         variable)
             else:
                 wstr = (variable + " is no a longer supported "

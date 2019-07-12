@@ -1,4 +1,33 @@
 """Tests for the Google Assistant integration."""
+from homeassistant.components.google_assistant import helpers
+
+
+class MockConfig(helpers.AbstractConfig):
+    """Fake config that always exposes everything."""
+
+    def __init__(self, *, secure_devices_pin=None, should_expose=None,
+                 entity_config=None):
+        """Initialize config."""
+        self._should_expose = should_expose
+        self._secure_devices_pin = secure_devices_pin
+        self._entity_config = entity_config or {}
+
+    @property
+    def secure_devices_pin(self):
+        """Return secure devices pin."""
+        return self._secure_devices_pin
+
+    @property
+    def entity_config(self):
+        """Return secure devices pin."""
+        return self._entity_config
+
+    def should_expose(self, state):
+        """Expose it all."""
+        return self._should_expose is None or self._should_expose(state)
+
+
+BASIC_CONFIG = MockConfig()
 
 DEMO_DEVICES = [{
     'id':
@@ -8,8 +37,7 @@ DEMO_DEVICES = [{
     },
     'traits': [
         'action.devices.traits.OnOff', 'action.devices.traits.Brightness',
-        'action.devices.traits.ColorSpectrum',
-        'action.devices.traits.ColorTemperature'
+        'action.devices.traits.ColorSetting',
     ],
     'type':
     'action.devices.types.LIGHT',
@@ -48,8 +76,7 @@ DEMO_DEVICES = [{
     },
     'traits': [
         'action.devices.traits.OnOff', 'action.devices.traits.Brightness',
-        'action.devices.traits.ColorSpectrum',
-        'action.devices.traits.ColorTemperature'
+        'action.devices.traits.ColorSetting',
     ],
     'type':
     'action.devices.types.LIGHT',
@@ -63,8 +90,7 @@ DEMO_DEVICES = [{
     },
     'traits': [
         'action.devices.traits.OnOff', 'action.devices.traits.Brightness',
-        'action.devices.traits.ColorSpectrum',
-        'action.devices.traits.ColorTemperature'
+        'action.devices.traits.ColorSetting',
     ],
     'type':
     'action.devices.types.LIGHT',
@@ -93,9 +119,9 @@ DEMO_DEVICES = [{
         'name': 'Living Room Window'
     },
     'traits':
-    ['action.devices.traits.OnOff', 'action.devices.traits.Brightness'],
+    ['action.devices.traits.OpenClose'],
     'type':
-    'action.devices.types.SWITCH',
+    'action.devices.types.BLINDS',
     'willReportState':
     False
 }, {
@@ -105,9 +131,9 @@ DEMO_DEVICES = [{
         'name': 'Hall Window'
     },
     'traits':
-    ['action.devices.traits.OnOff', 'action.devices.traits.Brightness'],
+    ['action.devices.traits.OpenClose'],
     'type':
-    'action.devices.types.SWITCH',
+    'action.devices.types.BLINDS',
     'willReportState':
     False
 }, {
@@ -115,16 +141,18 @@ DEMO_DEVICES = [{
     'name': {
         'name': 'Garage Door'
     },
-    'traits': ['action.devices.traits.OnOff'],
-    'type': 'action.devices.types.SWITCH',
+    'traits': ['action.devices.traits.OpenClose'],
+    'type':
+    'action.devices.types.GARAGE',
     'willReportState': False
 }, {
     'id': 'cover.kitchen_window',
     'name': {
         'name': 'Kitchen Window'
     },
-    'traits': ['action.devices.traits.OnOff'],
-    'type': 'action.devices.types.SWITCH',
+    'traits': ['action.devices.traits.OpenClose'],
+    'type':
+    'action.devices.types.BLINDS',
     'willReportState': False
 }, {
     'id': 'group.all_covers',
@@ -142,7 +170,7 @@ DEMO_DEVICES = [{
     },
     'traits':
         [
-            'action.devices.traits.OnOff', 'action.devices.traits.Brightness',
+            'action.devices.traits.OnOff', 'action.devices.traits.Volume',
             'action.devices.traits.Modes'
         ],
     'type':
@@ -157,7 +185,7 @@ DEMO_DEVICES = [{
     },
     'traits':
         [
-            'action.devices.traits.OnOff', 'action.devices.traits.Brightness',
+            'action.devices.traits.OnOff', 'action.devices.traits.Volume',
             'action.devices.traits.Modes'
         ],
     'type':
@@ -179,7 +207,7 @@ DEMO_DEVICES = [{
         'name': 'Walkman'
     },
     'traits':
-    ['action.devices.traits.OnOff', 'action.devices.traits.Brightness'],
+    ['action.devices.traits.OnOff', 'action.devices.traits.Volume'],
     'type':
     'action.devices.types.SWITCH',
     'willReportState':
@@ -223,7 +251,7 @@ DEMO_DEVICES = [{
     'type': 'action.devices.types.THERMOSTAT',
     'willReportState': False,
     'attributes': {
-        'availableThermostatModes': 'heat,cool,heatcool,off',
+        'availableThermostatModes': 'off,heat,cool,heatcool,auto,dry,fan-only',
         'thermostatTemperatureUnit': 'C',
     },
 }, {
@@ -231,10 +259,7 @@ DEMO_DEVICES = [{
     'name': {
         'name': 'HeatPump'
     },
-    'traits': [
-        'action.devices.traits.OnOff',
-        'action.devices.traits.TemperatureSetting'
-    ],
+    'traits': ['action.devices.traits.TemperatureSetting'],
     'type': 'action.devices.types.THERMOSTAT',
     'willReportState': False
 }, {

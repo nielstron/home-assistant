@@ -16,8 +16,6 @@ from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.util.dt import utcnow
 
-REQUIREMENTS = ['pycarwings2==2.8']
-
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = 'nissan_leaf'
@@ -303,6 +301,9 @@ class LeafDataStore:
                 self.data[DATA_PLUGGED_IN] = (
                     server_response.is_connected
                 )
+                self.data[DATA_CHARGING] = (
+                    server_response.is_charging
+                )
                 async_dispatcher_send(self.hass, SIGNAL_UPDATE_LEAF)
                 self.last_battery_response = utcnow()
 
@@ -470,7 +471,7 @@ class LeafEntity(Entity):
     def log_registration(self):
         """Log registration."""
         _LOGGER.debug(
-            "Registered %s component for VIN %s",
+            "Registered %s integration for VIN %s",
             self.__class__.__name__, self.car.leaf.vin)
 
     @property

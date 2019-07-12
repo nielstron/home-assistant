@@ -1,3 +1,9 @@
+[MASTER]
+ignore=tests
+
+[BASIC]
+good-names=i,j,k,ex,Run,_,fp
+
 [MESSAGES CONTROL]
 # Reasons disabled:
 # locally-disabled - it spams too much
@@ -42,7 +48,6 @@ reports=no
 [TYPECHECK]
 # For attrs
 ignored-classes=_CountingAttr
-generated-members=botocore.errorfactory
 
 [FORMAT]
 expected-line-ending-format=LF

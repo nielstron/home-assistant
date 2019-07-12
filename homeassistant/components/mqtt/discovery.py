@@ -1,43 +1,48 @@
-"""
-Support for MQTT discovery.
-
-For more details about this component, please refer to the documentation at
-https://home-assistant.io/components/mqtt/#discovery
-"""
+"""Support for MQTT discovery."""
 import asyncio
 import json
 import logging
 import re
 
 from homeassistant.components import mqtt
-from homeassistant.components.mqtt import ATTR_DISCOVERY_HASH, CONF_STATE_TOPIC
 from homeassistant.const import CONF_DEVICE, CONF_PLATFORM
 from homeassistant.helpers.discovery import async_load_platform
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.typing import HomeAssistantType
 
+from .const import ATTR_DISCOVERY_HASH, CONF_STATE_TOPIC
+
 _LOGGER = logging.getLogger(__name__)
 
 TOPIC_MATCHER = re.compile(
-    r'(?P<prefix_topic>\w+)/(?P<component>\w+)/'
-    r'(?:(?P<node_id>[a-zA-Z0-9_-]+)/)?(?P<object_id>[a-zA-Z0-9_-]+)/config')
+    r'(?P<component>\w+)/(?:(?P<node_id>[a-zA-Z0-9_-]+)/)'
+    r'?(?P<object_id>[a-zA-Z0-9_-]+)/config')
 
 SUPPORTED_COMPONENTS = [
-    'binary_sensor', 'camera', 'cover', 'fan',
-    'light', 'sensor', 'switch', 'lock', 'climate',
-    'alarm_control_panel', 'vacuum']
-
-CONFIG_ENTRY_COMPONENTS = [
+    'alarm_control_panel',
     'binary_sensor',
     'camera',
+    'climate',
     'cover',
+    'fan',
     'light',
     'lock',
     'sensor',
     'switch',
-    'climate',
+    'vacuum',
+]
+
+CONFIG_ENTRY_COMPONENTS = [
     'alarm_control_panel',
+    'binary_sensor',
+    'camera',
+    'climate',
+    'cover',
     'fan',
+    'light',
+    'lock',
+    'sensor',
+    'switch',
     'vacuum',
 ]
 
@@ -47,6 +52,14 @@ DEPRECATED_PLATFORM_TO_SCHEMA = {
         'mqtt_template': 'template',
     }
 }
+
+# These components require state_topic to be set.
+# If not specified, infer state_topic from discovery topic.
+IMPLICIT_STATE_TOPIC_COMPONENTS = [
+    'alarm_control_panel',
+    'binary_sensor',
+    'sensor',
+]
 
 
 ALREADY_DISCOVERED = 'mqtt_discovered_components'
@@ -65,9 +78,11 @@ ABBREVIATIONS = {
     'away_mode_cmd_t': 'away_mode_command_topic',
     'away_mode_stat_tpl': 'away_mode_state_template',
     'away_mode_stat_t': 'away_mode_state_topic',
+    'b_tpl': 'blue_template',
     'bri_cmd_t': 'brightness_command_topic',
     'bri_scl': 'brightness_scale',
     'bri_stat_t': 'brightness_state_topic',
+    'bri_tpl': 'brightness_template',
     'bri_val_tpl': 'brightness_value_template',
     'clr_temp_cmd_tpl': 'color_temp_command_template',
     'bat_lev_t': 'battery_level_topic',
@@ -79,8 +94,11 @@ ABBREVIATIONS = {
     'clr_temp_val_tpl': 'color_temp_value_template',
     'cln_t': 'cleaning_topic',
     'cln_tpl': 'cleaning_template',
+    'cmd_off_tpl': 'command_off_template',
+    'cmd_on_tpl': 'command_on_template',
     'cmd_t': 'command_topic',
     'curr_temp_t': 'current_temperature_topic',
+    'curr_temp_tpl': 'current_temperature_template',
     'dev': 'device',
     'dev_cla': 'device_class',
     'dock_t': 'docked_topic',
@@ -93,12 +111,14 @@ ABBREVIATIONS = {
     'fx_cmd_t': 'effect_command_topic',
     'fx_list': 'effect_list',
     'fx_stat_t': 'effect_state_topic',
+    'fx_tpl': 'effect_template',
     'fx_val_tpl': 'effect_value_template',
     'exp_aft': 'expire_after',
     'fan_mode_cmd_t': 'fan_mode_command_topic',
     'fan_mode_stat_tpl': 'fan_mode_state_template',
     'fan_mode_stat_t': 'fan_mode_state_topic',
     'frc_upd': 'force_update',
+    'g_tpl': 'green_template',
     'hold_cmd_t': 'hold_command_topic',
     'hold_stat_tpl': 'hold_state_template',
     'hold_stat_t': 'hold_state_topic',
@@ -135,6 +155,7 @@ ABBREVIATIONS = {
     'pl_stop': 'payload_stop',
     'pl_unlk': 'payload_unlock',
     'pow_cmd_t': 'power_command_topic',
+    'r_tpl': 'red_template',
     'ret': 'retain',
     'rgb_cmd_tpl': 'rgb_command_template',
     'rgb_cmd_t': 'rgb_command_topic',
@@ -144,6 +165,7 @@ ABBREVIATIONS = {
     'send_if_off': 'send_if_off',
     'set_pos_tpl': 'set_position_template',
     'set_pos_t': 'set_position_topic',
+    'pos_t': 'position_topic',
     'spd_cmd_t': 'speed_command_topic',
     'spd_stat_t': 'speed_state_topic',
     'spd_val_tpl': 'speed_value_template',
@@ -153,6 +175,7 @@ ABBREVIATIONS = {
     'stat_on': 'state_on',
     'stat_open': 'state_open',
     'stat_t': 'state_topic',
+    'stat_tpl': 'state_template',
     'stat_val_tpl': 'state_value_template',
     'sup_feat': 'supported_features',
     'swing_mode_cmd_t': 'swing_mode_command_topic',
@@ -197,20 +220,29 @@ def clear_discovery_hash(hass, discovery_hash):
     del hass.data[ALREADY_DISCOVERED][discovery_hash]
 
 
+class MQTTConfig(dict):
+    """Dummy class to allow adding attributes."""
+
+    pass
+
+
 async def async_start(hass: HomeAssistantType, discovery_topic, hass_config,
                       config_entry=None) -> bool:
     """Initialize of MQTT Discovery."""
-    async def async_device_message_received(topic, payload, qos):
+    async def async_device_message_received(msg):
         """Process the received message."""
-        match = TOPIC_MATCHER.match(topic)
+        payload = msg.payload
+        topic = msg.topic
+        topic_trimmed = topic.replace('{}/'.format(discovery_topic), '', 1)
+        match = TOPIC_MATCHER.match(topic_trimmed)
 
         if not match:
             return
 
-        _prefix_topic, component, node_id, object_id = match.groups()
+        component, node_id, object_id = match.groups()
 
         if component not in SUPPORTED_COMPONENTS:
-            _LOGGER.warning("Component %s is not supported", component)
+            _LOGGER.warning("Integration %s is not supported", component)
             return
 
         if payload:
@@ -221,7 +253,7 @@ async def async_start(hass: HomeAssistantType, discovery_topic, hass_config,
                                 object_id, payload)
                 return
 
-        payload = dict(payload)
+        payload = MQTTConfig(payload)
 
         for key in list(payload.keys()):
             abbreviated_key = key
@@ -235,8 +267,8 @@ async def async_start(hass: HomeAssistantType, discovery_topic, hass_config,
                 key = DEVICE_ABBREVIATIONS.get(key, key)
                 device[key] = device.pop(abbreviated_key)
 
-        base = payload.pop(TOPIC_BASE, None)
-        if base:
+        if TOPIC_BASE in payload:
+            base = payload.pop(TOPIC_BASE)
             for key, value in payload.items():
                 if isinstance(value, str) and value:
                     if value[0] == TOPIC_BASE and key.endswith('_topic'):
@@ -249,6 +281,10 @@ async def async_start(hass: HomeAssistantType, discovery_topic, hass_config,
         discovery_hash = (component, discovery_id)
 
         if payload:
+            # Attach MQTT topic to the payload, used for debug prints
+            setattr(payload, '__configuration_source__',
+                    "MQTT (topic: '{}')".format(topic))
+
             if CONF_PLATFORM in payload and 'schema' not in payload:
                 platform = payload[CONF_PLATFORM]
                 if (component in DEPRECATED_PLATFORM_TO_SCHEMA and
@@ -260,10 +296,16 @@ async def async_start(hass: HomeAssistantType, discovery_topic, hass_config,
                                     platform, schema)
             payload[CONF_PLATFORM] = 'mqtt'
 
-            if CONF_STATE_TOPIC not in payload:
+            if (CONF_STATE_TOPIC not in payload and
+                    component in IMPLICIT_STATE_TOPIC_COMPONENTS):
+                # state_topic not specified, infer from discovery topic
                 payload[CONF_STATE_TOPIC] = '{}/{}/{}{}/state'.format(
                     discovery_topic, component,
                     '%s/' % node_id if node_id else '', object_id)
+                _LOGGER.warning('implicit %s is deprecated, add "%s":"%s" to '
+                                '%s discovery message',
+                                CONF_STATE_TOPIC, CONF_STATE_TOPIC,
+                                payload[CONF_STATE_TOPIC], topic)
 
             payload[ATTR_DISCOVERY_HASH] = discovery_hash
 

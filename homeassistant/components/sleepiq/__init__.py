@@ -1,7 +1,6 @@
 """Support for SleepIQ from SleepNumber."""
 import logging
 from datetime import timedelta
-from requests.exceptions import HTTPError
 
 import voluptuous as vol
 
@@ -12,8 +11,6 @@ from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 from homeassistant.util import Throttle
 
 DOMAIN = 'sleepiq'
-
-REQUIREMENTS = ['sleepyq==0.6']
 
 MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=30)
 
@@ -55,7 +52,7 @@ def setup(hass, config):
     try:
         DATA = SleepIQData(client)
         DATA.update()
-    except HTTPError:
+    except ValueError:
         message = """
             SleepIQ failed to login, double check your username and password"
         """

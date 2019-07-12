@@ -20,11 +20,7 @@ from .const import (
     CONF_WEBHOOK_URL, DOMAIN, EVENT_RECEIVED, POINT_DISCOVERY_NEW,
     SCAN_INTERVAL, SIGNAL_UPDATE_ENTITY, SIGNAL_WEBHOOK)
 
-REQUIREMENTS = ['pypoint==1.1.1']
-
 _LOGGER = logging.getLogger(__name__)
-
-DEPENDENCIES = ['webhook']
 
 CONF_CLIENT_ID = 'client_id'
 CONF_CLIENT_SECRET = 'client_secret'
@@ -92,7 +88,7 @@ async def async_setup_entry(hass: HomeAssistantType, entry: ConfigEntry):
     await async_setup_webhook(hass, entry, session)
     client = MinutPointClient(hass, entry, session)
     hass.data.setdefault(DOMAIN, {}).update({entry.entry_id: client})
-    await client.update()
+    hass.async_create_task(client.update())
 
     return True
 
@@ -304,7 +300,7 @@ class MinutPointEntity(Entity):
             'model': 'Point v{}'.format(device['hardware_version']),
             'name': device['description'],
             'sw_version': device['firmware']['installed'],
-            'via_hub': (DOMAIN, device['home']),
+            'via_device': (DOMAIN, device['home']),
         }
 
     @property

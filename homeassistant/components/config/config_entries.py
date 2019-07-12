@@ -1,11 +1,11 @@
 """Http views to control the config manager."""
-
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.auth.permissions.const import CAT_CONFIG_ENTRIES
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.exceptions import Unauthorized
 from homeassistant.helpers.data_entry_flow import (
     FlowManagerIndexView, FlowManagerResourceView)
+from homeassistant.loader import async_get_config_flows
 
 
 async def async_setup(hass):
@@ -60,7 +60,7 @@ class ConfigManagerEntryIndexView(HomeAssistantView):
             'state': entry.state,
             'connection_class': entry.connection_class,
             'supports_options': hasattr(
-                config_entries.HANDLERS[entry.domain],
+                config_entries.HANDLERS.get(entry.domain),
                 'async_get_options_flow'),
         } for entry in hass.config_entries.async_entries()])
 
@@ -118,6 +118,16 @@ class ConfigManagerFlowIndexView(FlowManagerIndexView):
         # pylint: disable=no-value-for-parameter
         return await super().post(request)
 
+    def _prepare_result_json(self, result):
+        """Convert result to JSON."""
+        if result['type'] != data_entry_flow.RESULT_TYPE_CREATE_ENTRY:
+            return super()._prepare_result_json(result)
+
+        data = result.copy()
+        data['result'] = data['result'].entry_id
+        data.pop('data')
+        return data
+
 
 class ConfigManagerFlowResourceView(FlowManagerResourceView):
     """View to interact with the flow manager."""
@@ -143,6 +153,16 @@ class ConfigManagerFlowResourceView(FlowManagerResourceView):
         # pylint: disable=no-value-for-parameter
         return await super().post(request, flow_id)
 
+    def _prepare_result_json(self, result):
+        """Convert result to JSON."""
+        if result['type'] != data_entry_flow.RESULT_TYPE_CREATE_ENTRY:
+            return super()._prepare_result_json(result)
+
+        data = result.copy()
+        data['result'] = data['result'].entry_id
+        data.pop('data')
+        return data
+
 
 class ConfigManagerAvailableFlowView(HomeAssistantView):
     """View to query available flows."""
@@ -152,7 +172,8 @@ class ConfigManagerAvailableFlowView(HomeAssistantView):
 
     async def get(self, request):
         """List available flow handlers."""
-        return self.json(config_entries.FLOWS)
+        hass = request.app['hass']
+        return self.json(await async_get_config_flows(hass))
 
 
 class OptionManagerFlowIndexView(FlowManagerIndexView):
@@ -175,7 +196,7 @@ class OptionManagerFlowIndexView(FlowManagerIndexView):
         return await super().post(request)
 
 
-class OptionManagerFlowResourceView(ConfigManagerFlowResourceView):
+class OptionManagerFlowResourceView(FlowManagerResourceView):
     """View to interact with the option flow manager."""
 
     url = '/api/config/config_entries/options/flow/{flow_id}'

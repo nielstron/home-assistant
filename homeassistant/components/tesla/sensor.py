@@ -2,16 +2,13 @@
 from datetime import timedelta
 import logging
 
-from homeassistant.components.sensor import ENTITY_ID_FORMAT
-from homeassistant.components.tesla import DOMAIN as TESLA_DOMAIN
-from homeassistant.components.tesla import TeslaDevice
 from homeassistant.const import (
-    TEMP_CELSIUS, TEMP_FAHRENHEIT, LENGTH_KILOMETERS, LENGTH_MILES)
+    LENGTH_KILOMETERS, LENGTH_MILES, TEMP_CELSIUS, TEMP_FAHRENHEIT)
 from homeassistant.helpers.entity import Entity
 
-_LOGGER = logging.getLogger(__name__)
+from . import DOMAIN as TESLA_DOMAIN, TeslaDevice
 
-DEPENDENCIES = ['tesla']
+_LOGGER = logging.getLogger(__name__)
 
 SCAN_INTERVAL = timedelta(minutes=5)
 
@@ -43,10 +40,13 @@ class TeslaSensor(TeslaDevice, Entity):
 
         if self.type:
             self._name = '{} ({})'.format(self.tesla_device.name, self.type)
-            self.entity_id = ENTITY_ID_FORMAT.format(
-                '{}_{}'.format(self.tesla_id, self.type))
-        else:
-            self.entity_id = ENTITY_ID_FORMAT.format(self.tesla_id)
+
+    @property
+    def unique_id(self) -> str:
+        """Return a unique ID."""
+        if self.type:
+            return "{}_{}".format(self.tesla_id, self.type)
+        return self.tesla_id
 
     @property
     def state(self):

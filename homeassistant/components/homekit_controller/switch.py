@@ -1,22 +1,34 @@
 """Support for Homekit switches."""
 import logging
 
-from homeassistant.components.homekit_controller import (
-    KNOWN_ACCESSORIES, HomeKitEntity)
 from homeassistant.components.switch import SwitchDevice
 
-DEPENDENCIES = ['homekit_controller']
+from . import KNOWN_DEVICES, HomeKitEntity
 
 OUTLET_IN_USE = "outlet_in_use"
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up Homekit switch support."""
-    if discovery_info is not None:
-        accessory = hass.data[KNOWN_ACCESSORIES][discovery_info['serial']]
-        add_entities([HomeKitSwitch(accessory, discovery_info)], True)
+async def async_setup_platform(
+        hass, config, async_add_entities, discovery_info=None):
+    """Legacy set up platform."""
+    pass
+
+
+async def async_setup_entry(hass, config_entry, async_add_entities):
+    """Set up Homekit lock."""
+    hkid = config_entry.data['AccessoryPairingID']
+    conn = hass.data[KNOWN_DEVICES][hkid]
+
+    def async_add_service(aid, service):
+        if service['stype'] not in ('switch', 'outlet'):
+            return False
+        info = {'aid': aid, 'iid': service['iid']}
+        async_add_entities([HomeKitSwitch(conn, info)], True)
+        return True
+
+    conn.add_listener(async_add_service)
 
 
 class HomeKitSwitch(HomeKitEntity, SwitchDevice):
@@ -48,20 +60,20 @@ class HomeKitSwitch(HomeKitEntity, SwitchDevice):
         """Return true if device is on."""
         return self._on
 
-    def turn_on(self, **kwargs):
+    async def async_turn_on(self, **kwargs):
         """Turn the specified switch on."""
         self._on = True
         characteristics = [{'aid': self._aid,
                             'iid': self._chars['on'],
                             'value': True}]
-        self.put_characteristics(characteristics)
+        await self._accessory.put_characteristics(characteristics)
 
-    def turn_off(self, **kwargs):
+    async def async_turn_off(self, **kwargs):
         """Turn the specified switch off."""
         characteristics = [{'aid': self._aid,
                             'iid': self._chars['on'],
                             'value': False}]
-        self.put_characteristics(characteristics)
+        await self._accessory.put_characteristics(characteristics)
 
     @property
     def device_state_attributes(self):

@@ -1,9 +1,4 @@
-"""
-Component to interface with an alarm control panel.
-
-For more details about this platform, please refer to the documentation at
-https://home-assistant.io/components/alarm_control_panel/
-"""
+"""Component to interface with an alarm control panel."""
 from datetime import timedelta
 import logging
 
@@ -24,6 +19,7 @@ SCAN_INTERVAL = timedelta(seconds=30)
 ATTR_CHANGED_BY = 'changed_by'
 FORMAT_TEXT = 'text'
 FORMAT_NUMBER = 'number'
+ATTR_CODE_ARM_REQUIRED = 'code_arm_required'
 
 ENTITY_ID_FORMAT = DOMAIN + '.{}'
 
@@ -91,6 +87,11 @@ class AlarmControlPanel(Entity):
     def changed_by(self):
         """Last change triggered by."""
         return None
+
+    @property
+    def code_arm_required(self):
+        """Whether the code is required for arm actions."""
+        return True
 
     def alarm_disarm(self, code=None):
         """Send disarm command."""
@@ -164,6 +165,7 @@ class AlarmControlPanel(Entity):
         """Return the state attributes."""
         state_attr = {
             ATTR_CODE_FORMAT: self.code_format,
-            ATTR_CHANGED_BY: self.changed_by
+            ATTR_CHANGED_BY: self.changed_by,
+            ATTR_CODE_ARM_REQUIRED: self.code_arm_required
         }
         return state_attr

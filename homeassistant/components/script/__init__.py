@@ -18,8 +18,6 @@ from homeassistant.helpers.script import Script
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = 'script'
-DEPENDENCIES = ['group']
-
 ATTR_CAN_CANCEL = 'can_cancel'
 ATTR_LAST_ACTION = 'last_action'
 ATTR_LAST_TRIGGERED = 'last_triggered'
@@ -74,20 +72,26 @@ async def async_setup(hass, config):
         # We could turn on script directly here, but we only want to offer
         # one way to do it. Otherwise no easy way to detect invocations.
         var = service.data.get(ATTR_VARIABLES)
-        for script in component.async_extract_from_service(service):
+        for script in await component.async_extract_from_service(service):
             await hass.services.async_call(DOMAIN, script.object_id, var,
                                            context=service.context)
 
     async def turn_off_service(service):
         """Cancel a script."""
         # Stopping a script is ok to be done in parallel
-        await asyncio.wait(
-            [script.async_turn_off() for script
-             in component.async_extract_from_service(service)], loop=hass.loop)
+        scripts = await component.async_extract_from_service(service)
+
+        if not scripts:
+            return
+
+        await asyncio.wait([
+            script.async_turn_off() for script
+            in scripts
+        ])
 
     async def toggle_service(service):
         """Toggle a script."""
-        for script in component.async_extract_from_service(service):
+        for script in await component.async_extract_from_service(service):
             await script.async_toggle(context=service.context)
 
     hass.services.async_register(DOMAIN, SERVICE_RELOAD, reload_service,
@@ -169,8 +173,14 @@ class ScriptEntity(ToggleEntity):
             ATTR_NAME: self.script.name,
             ATTR_ENTITY_ID: self.entity_id,
         }, context=context)
-        await self.script.async_run(
-            kwargs.get(ATTR_VARIABLES), context)
+        try:
+            await self.script.async_run(
+                kwargs.get(ATTR_VARIABLES), context)
+        except Exception as err:  # pylint: disable=broad-except
+            self.script.async_log_exception(
+                _LOGGER, "Error executing script {}".format(self.entity_id),
+                err)
+            raise err
 
     async def async_turn_off(self, **kwargs):
         """Turn script off."""

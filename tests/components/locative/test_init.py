@@ -22,15 +22,16 @@ def mock_dev_track(mock_device_tracker_conf):
 
 
 @pytest.fixture
-def locative_client(loop, hass, hass_client):
+async def locative_client(loop, hass, hass_client):
     """Locative mock client."""
-    assert loop.run_until_complete(async_setup_component(
+    assert await async_setup_component(
         hass, DOMAIN, {
             DOMAIN: {}
-        }))
+        })
+    await hass.async_block_till_done()
 
-    with patch('homeassistant.components.device_tracker.update_config'):
-        yield loop.run_until_complete(hass_client())
+    with patch('homeassistant.components.device_tracker.legacy.update_config'):
+        return await hass_client()
 
 
 @pytest.fixture
@@ -45,6 +46,7 @@ async def webhook_id(hass, locative_client):
     result = await hass.config_entries.flow.async_configure(
         result['flow_id'], {})
     assert result['type'] == data_entry_flow.RESULT_TYPE_CREATE_ENTRY
+    await hass.async_block_till_done()
 
     return result['result'].data['webhook_id']
 
@@ -237,6 +239,43 @@ async def test_exit_first(hass, locative_client, webhook_id):
 
     state = hass.states.get('{}.{}'.format(DEVICE_TRACKER_DOMAIN,
                                            data['device']))
+    assert state.state == 'not_home'
+
+
+async def test_two_devices(hass, locative_client, webhook_id):
+    """Test updating two different devices."""
+    url = '/api/webhook/{}'.format(webhook_id)
+
+    data_device_1 = {
+        'latitude': 40.7855,
+        'longitude': -111.7367,
+        'device': 'device_1',
+        'id': 'Home',
+        'trigger': 'exit'
+    }
+
+    # Exit Home
+    req = await locative_client.post(url, data=data_device_1)
+    await hass.async_block_till_done()
+    assert req.status == HTTP_OK
+
+    state = hass.states.get('{}.{}'.format(DEVICE_TRACKER_DOMAIN,
+                                           data_device_1['device']))
+    assert state.state == 'not_home'
+
+    # Enter Home
+    data_device_2 = dict(data_device_1)
+    data_device_2['device'] = 'device_2'
+    data_device_2['trigger'] = 'enter'
+    req = await locative_client.post(url, data=data_device_2)
+    await hass.async_block_till_done()
+    assert req.status == HTTP_OK
+
+    state = hass.states.get('{}.{}'.format(DEVICE_TRACKER_DOMAIN,
+                                           data_device_2['device']))
+    assert state.state == 'home'
+    state = hass.states.get('{}.{}'.format(DEVICE_TRACKER_DOMAIN,
+                                           data_device_1['device']))
     assert state.state == 'not_home'
 
 

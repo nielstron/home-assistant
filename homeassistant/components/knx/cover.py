@@ -5,11 +5,12 @@ from homeassistant.components.cover import (
     ATTR_POSITION, ATTR_TILT_POSITION, PLATFORM_SCHEMA, SUPPORT_CLOSE,
     SUPPORT_OPEN, SUPPORT_SET_POSITION, SUPPORT_SET_TILT_POSITION,
     SUPPORT_STOP, CoverDevice)
-from homeassistant.components.knx import ATTR_DISCOVER_DEVICES, DATA_KNX
 from homeassistant.const import CONF_NAME
 from homeassistant.core import callback
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.event import async_track_utc_time_change
+
+from . import ATTR_DISCOVER_DEVICES, DATA_KNX
 
 CONF_MOVE_LONG_ADDRESS = 'move_long_address'
 CONF_MOVE_SHORT_ADDRESS = 'move_short_address'
@@ -24,8 +25,6 @@ CONF_INVERT_ANGLE = 'invert_angle'
 
 DEFAULT_TRAVEL_TIME = 25
 DEFAULT_NAME = 'KNX Cover'
-DEPENDENCIES = ['knx']
-
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
     vol.Optional(CONF_MOVE_LONG_ADDRESS): cv.string,
@@ -68,7 +67,7 @@ def async_add_entities_config(hass, config, async_add_entities):
     import xknx
     cover = xknx.devices.Cover(
         hass.data[DATA_KNX].xknx,
-        name=config.get(CONF_NAME),
+        name=config[CONF_NAME],
         group_address_long=config.get(CONF_MOVE_LONG_ADDRESS),
         group_address_short=config.get(CONF_MOVE_SHORT_ADDRESS),
         group_address_position_state=config.get(
@@ -76,10 +75,10 @@ def async_add_entities_config(hass, config, async_add_entities):
         group_address_angle=config.get(CONF_ANGLE_ADDRESS),
         group_address_angle_state=config.get(CONF_ANGLE_STATE_ADDRESS),
         group_address_position=config.get(CONF_POSITION_ADDRESS),
-        travel_time_down=config.get(CONF_TRAVELLING_TIME_DOWN),
-        travel_time_up=config.get(CONF_TRAVELLING_TIME_UP),
-        invert_position=config.get(CONF_INVERT_POSITION),
-        invert_angle=config.get(CONF_INVERT_ANGLE))
+        travel_time_down=config[CONF_TRAVELLING_TIME_DOWN],
+        travel_time_up=config[CONF_TRAVELLING_TIME_UP],
+        invert_position=config[CONF_INVERT_POSITION],
+        invert_angle=config[CONF_INVERT_ANGLE])
 
     hass.data[DATA_KNX].xknx.devices.add(cover)
     async_add_entities([KNXCover(cover)])

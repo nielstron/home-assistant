@@ -12,15 +12,17 @@ from homeassistant.config_entries import HANDLERS
 from homeassistant.core import callback
 from homeassistant.setup import async_setup_component
 from homeassistant.components.config import config_entries
-from homeassistant.loader import set_component
+from homeassistant.generated import config_flows
 
-from tests.common import MockConfigEntry, MockModule, mock_coro_func
+from tests.common import (
+    MockConfigEntry, MockModule, mock_coro_func, mock_integration,
+    mock_entity_platform)
 
 
 @pytest.fixture(autouse=True)
 def mock_test_component(hass):
     """Ensure a component called 'test' exists."""
-    set_component(hass, 'test', MockModule('test'))
+    mock_integration(hass, MockModule('test'))
 
 
 @pytest.fixture
@@ -31,10 +33,30 @@ def client(hass, hass_client):
     yield hass.loop.run_until_complete(hass_client())
 
 
+@HANDLERS.register('comp1')
+class Comp1ConfigFlow:
+    """Config flow with options flow."""
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config, options):
+        """Get options flow."""
+        pass
+
+
+@HANDLERS.register('comp2')
+class Comp2ConfigFlow:
+    """Config flow without options flow."""
+
+    def __init__(self):
+        """Init."""
+        pass
+
+
 async def test_get_entries(hass, client):
     """Test get entries."""
     MockConfigEntry(
-        domain='comp',
+        domain='comp1',
         title='Test 1',
         source='bla',
         connection_class=core_ce.CONN_CLASS_LOCAL_POLL,
@@ -47,18 +69,6 @@ async def test_get_entries(hass, client):
         connection_class=core_ce.CONN_CLASS_ASSUMED,
     ).add_to_hass(hass)
 
-    class CompConfigFlow:
-        @staticmethod
-        @callback
-        def async_get_options_flow(config, options):
-            pass
-    HANDLERS['comp'] = CompConfigFlow()
-
-    class Comp2ConfigFlow:
-        def __init__(self):
-            pass
-    HANDLERS['comp2'] = Comp2ConfigFlow()
-
     resp = await client.get('/api/config/config_entries/entry')
     assert resp.status == 200
     data = await resp.json()
@@ -66,7 +76,7 @@ async def test_get_entries(hass, client):
         entry.pop('entry_id')
     assert data == [
         {
-            'domain': 'comp',
+            'domain': 'comp1',
             'title': 'Test 1',
             'source': 'bla',
             'state': 'not_loaded',
@@ -113,12 +123,12 @@ async def test_remove_entry_unauth(hass, client, hass_admin_user):
 @asyncio.coroutine
 def test_available_flows(hass, client):
     """Test querying the available flows."""
-    with patch.object(core_ce, 'FLOWS', ['hello', 'world']):
+    with patch.object(config_flows, 'FLOWS', ['hello', 'world']):
         resp = yield from client.get(
             '/api/config/config_entries/flow_handlers')
         assert resp.status == 200
         data = yield from resp.json()
-        assert data == ['hello', 'world']
+        assert set(data) == set(['hello', 'world'])
 
 
 ############################
@@ -129,6 +139,8 @@ def test_available_flows(hass, client):
 @asyncio.coroutine
 def test_initialize_flow(hass, client):
     """Test we can initialize a flow."""
+    mock_entity_platform(hass, 'config_flow.test', None)
+
     class TestFlow(core_ce.ConfigFlow):
         @asyncio.coroutine
         def async_step_user(self, user_input=None):
@@ -213,6 +225,8 @@ async def test_initialize_flow_unauth(hass, client, hass_admin_user):
 @asyncio.coroutine
 def test_abort(hass, client):
     """Test a flow that aborts."""
+    mock_entity_platform(hass, 'config_flow.test', None)
+
     class TestFlow(core_ce.ConfigFlow):
         @asyncio.coroutine
         def async_step_user(self, user_input=None):
@@ -226,6 +240,7 @@ def test_abort(hass, client):
     data = yield from resp.json()
     data.pop('flow_id')
     assert data == {
+        'description_placeholders': None,
         'handler': 'test',
         'reason': 'bla',
         'type': 'abort'
@@ -235,8 +250,10 @@ def test_abort(hass, client):
 @asyncio.coroutine
 def test_create_account(hass, client):
     """Test a flow that creates an account."""
-    set_component(
-        hass, 'test',
+    mock_entity_platform(hass, 'config_flow.test', None)
+
+    mock_integration(
+        hass,
         MockModule('test', async_setup_entry=mock_coro_func(True)))
 
     class TestFlow(core_ce.ConfigFlow):
@@ -254,6 +271,10 @@ def test_create_account(hass, client):
                                       json={'handler': 'test'})
 
     assert resp.status == 200
+
+    entries = hass.config_entries.async_entries('test')
+    assert len(entries) == 1
+
     data = yield from resp.json()
     data.pop('flow_id')
     assert data == {
@@ -261,6 +282,7 @@ def test_create_account(hass, client):
         'title': 'Test Entry',
         'type': 'create_entry',
         'version': 1,
+        'result': entries[0].entry_id,
         'description': None,
         'description_placeholders': None,
     }
@@ -269,9 +291,10 @@ def test_create_account(hass, client):
 @asyncio.coroutine
 def test_two_step_flow(hass, client):
     """Test we can finish a two step flow."""
-    set_component(
-        hass, 'test',
+    mock_integration(
+        hass,
         MockModule('test', async_setup_entry=mock_coro_func(True)))
+    mock_entity_platform(hass, 'config_flow.test', None)
 
     class TestFlow(core_ce.ConfigFlow):
         VERSION = 1
@@ -316,6 +339,10 @@ def test_two_step_flow(hass, client):
             '/api/config/config_entries/flow/{}'.format(flow_id),
             json={'user_title': 'user-title'})
         assert resp.status == 200
+
+        entries = hass.config_entries.async_entries('test')
+        assert len(entries) == 1
+
         data = yield from resp.json()
         data.pop('flow_id')
         assert data == {
@@ -323,6 +350,7 @@ def test_two_step_flow(hass, client):
             'type': 'create_entry',
             'title': 'user-title',
             'version': 1,
+            'result': entries[0].entry_id,
             'description': None,
             'description_placeholders': None,
         }
@@ -330,9 +358,10 @@ def test_two_step_flow(hass, client):
 
 async def test_continue_flow_unauth(hass, client, hass_admin_user):
     """Test we can't finish a two step flow."""
-    set_component(
-        hass, 'test',
+    mock_integration(
+        hass,
         MockModule('test', async_setup_entry=mock_coro_func(True)))
+    mock_entity_platform(hass, 'config_flow.test', None)
 
     class TestFlow(core_ce.ConfigFlow):
         VERSION = 1
@@ -383,6 +412,8 @@ async def test_continue_flow_unauth(hass, client, hass_admin_user):
 @asyncio.coroutine
 def test_get_progress_index(hass, client):
     """Test querying for the flows that are in progress."""
+    mock_entity_platform(hass, 'config_flow.test', None)
+
     class TestFlow(core_ce.ConfigFlow):
         VERSION = 5
 
@@ -422,6 +453,8 @@ async def test_get_progress_index_unauth(hass, client, hass_admin_user):
 @asyncio.coroutine
 def test_get_progress_flow(hass, client):
     """Test we can query the API for same result as we get from init a flow."""
+    mock_entity_platform(hass, 'config_flow.test', None)
+
     class TestFlow(core_ce.ConfigFlow):
         @asyncio.coroutine
         def async_step_user(self, user_input=None):
@@ -455,6 +488,8 @@ def test_get_progress_flow(hass, client):
 
 async def test_get_progress_flow_unauth(hass, client, hass_admin_user):
     """Test we can can't query the API for result of flow."""
+    mock_entity_platform(hass, 'config_flow.test', None)
+
     class TestFlow(core_ce.ConfigFlow):
         async def async_step_user(self, user_input=None):
             schema = OrderedDict()
@@ -543,8 +578,8 @@ async def test_options_flow(hass, client):
 
 async def test_two_step_options_flow(hass, client):
     """Test we can finish a two step options flow."""
-    set_component(
-        hass, 'test',
+    mock_integration(
+        hass,
         MockModule('test', async_setup_entry=mock_coro_func(True)))
 
     class TestFlow(core_ce.ConfigFlow):

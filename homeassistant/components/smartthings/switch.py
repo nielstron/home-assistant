@@ -1,12 +1,12 @@
 """Support for switches through the SmartThings cloud API."""
 from typing import Optional, Sequence
 
+from pysmartthings import Attribute, Capability
+
 from homeassistant.components.switch import SwitchDevice
 
 from . import SmartThingsEntity
 from .const import DATA_BROKERS, DOMAIN
-
-DEPENDENCIES = ['smartthings']
 
 
 async def async_setup_platform(
@@ -25,8 +25,6 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
 def get_capabilities(capabilities: Sequence[str]) -> Optional[Sequence[str]]:
     """Return all capabilities supported if minimum required are present."""
-    from pysmartthings import Capability
-
     # Must be able to be turned on/off.
     if Capability.switch in capabilities:
         return [Capability.switch,
@@ -55,13 +53,11 @@ class SmartThingsSwitch(SmartThingsEntity, SwitchDevice):
     @property
     def current_power_w(self):
         """Return the current power usage in W."""
-        from pysmartthings import Attribute
         return self._device.status.attributes[Attribute.power].value
 
     @property
     def today_energy_kwh(self):
         """Return the today total energy usage in kWh."""
-        from pysmartthings import Attribute
         return self._device.status.attributes[Attribute.energy].value
 
     @property

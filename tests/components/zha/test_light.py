@@ -51,21 +51,21 @@ async def test_light(hass, config_entry, zha_gateway, monkeypatch):
     on_off_entity_id = make_entity_id(DOMAIN, zigpy_device_on_off,
                                       on_off_device_on_off_cluster,
                                       use_suffix=False)
-    on_off_zha_device = zha_gateway.get_device(str(zigpy_device_on_off.ieee))
+    on_off_zha_device = zha_gateway.get_device(zigpy_device_on_off.ieee)
 
     # dimmable light
     level_device_on_off_cluster = zigpy_device_level.endpoints.get(1).on_off
     level_device_level_cluster = zigpy_device_level.endpoints.get(1).level
     on_off_mock = MagicMock(side_effect=asyncio.coroutine(MagicMock(
-        return_value=(sentinel.data, Status.SUCCESS))))
+        return_value=[sentinel.data, Status.SUCCESS])))
     level_mock = MagicMock(side_effect=asyncio.coroutine(MagicMock(
-        return_value=(sentinel.data, Status.SUCCESS))))
+        return_value=[sentinel.data, Status.SUCCESS])))
     monkeypatch.setattr(level_device_on_off_cluster, 'request', on_off_mock)
     monkeypatch.setattr(level_device_level_cluster, 'request', level_mock)
     level_entity_id = make_entity_id(DOMAIN, zigpy_device_level,
                                      level_device_on_off_cluster,
                                      use_suffix=False)
-    level_zha_device = zha_gateway.get_device(str(zigpy_device_level.ieee))
+    level_zha_device = zha_gateway.get_device(zigpy_device_level.ieee)
 
     # test that the lights were created and that they are unavailable
     assert hass.states.get(on_off_entity_id).state == STATE_UNAVAILABLE
@@ -137,7 +137,7 @@ async def async_test_on_off_from_hass(hass, cluster, entity_id):
     from zigpy.zcl.foundation import Status
     with patch(
             'zigpy.zcl.Cluster.request',
-            return_value=mock_coro([Status.SUCCESS, Status.SUCCESS])):
+            return_value=mock_coro([0x00, Status.SUCCESS])):
         # turn on via UI
         await hass.services.async_call(DOMAIN, 'turn_on', {
             'entity_id': entity_id
@@ -154,7 +154,7 @@ async def async_test_off_from_hass(hass, cluster, entity_id):
     from zigpy.zcl.foundation import Status
     with patch(
             'zigpy.zcl.Cluster.request',
-            return_value=mock_coro([Status.SUCCESS, Status.SUCCESS])):
+            return_value=mock_coro([0x01, Status.SUCCESS])):
         # turn off via UI
         await hass.services.async_call(DOMAIN, 'turn_off', {
             'entity_id': entity_id
