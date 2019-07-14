@@ -1,0 +1,10 @@
+{
+  "domain": "blnet",
+  "name": "BLNet",
+  "documentation": "https://www.home-assistant.io/components/syncthru",
+  "requirements": [
+    "pyblnet==0.8.0"
+  ],
+  "dependencies": [],
+  "codeowners": ["@nielstron"]
+}
