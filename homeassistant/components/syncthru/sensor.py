@@ -93,6 +93,7 @@ class SyncThruSensor(Entity):
         self._icon = "mdi:printer"
         self._unit_of_measurement = None
         self._id_suffix = ""
+        self._available = True
 
     @property
     def unique_id(self):
@@ -129,6 +130,18 @@ class SyncThruSensor(Entity):
     def device_info(self):
         """Return device information."""
         return {"identifiers": device_identifiers(self.syncthru)}
+
+    @property
+    def available(self):
+        return self._available
+
+    def update(self):
+        self._available = self.syncthru.is_online()
+        if self._available:
+            self._update()
+
+    def _update(self):
+        pass
 
 
 class SyncThruMainSensor(SyncThruSensor):
@@ -201,19 +214,19 @@ class SyncThruDrumSensor(SyncThruSensor):
 class SyncThruInputTraySensor(SyncThruSensor):
     """Implementation of a Samsung Printer input tray sensor platform."""
 
-    def __init__(self, syncthru, name, number):
+    def __init__(self, syncthru, name, tray_name: str):
         """Initialize the sensor."""
         super().__init__(syncthru, name)
-        self._name = f"{name} Tray {number}"
-        self._number = number
-        self._id_suffix = f"_tray_{number}"
+        self._name = f"{name} {tray_name.capitalize().replace('_', ' ')}"
+        self._tray_name = tray_name
+        self._id_suffix = f"_{tray_name}"
 
     def update(self):
         """Get the latest data from SyncThru and update the state."""
         # Data fetching is taken care of through the Main sensor
 
         if self.syncthru.is_online():
-            self._attributes = self.syncthru.input_tray_status().get(self._number, {})
+            self._attributes = self.syncthru.input_tray_status().get(self._tray_name, {})
             self._state = self._attributes.get("newError")
             if self._state == "":
                 self._state = "Ready"
