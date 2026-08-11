@@ -1,13 +1,5 @@
 """Custom yaml object types."""
 
+from annotatedyaml import Input, NodeDictClass, NodeListClass, NodeStrClass
 
-class NodeListClass(list):
-    """Wrapper class to be able to add attributes on a list."""
-
-    pass
-
-
-class NodeStrClass(str):
-    """Wrapper class to be able to add attributes on a string."""
-
-    pass
+__all__ = ["Input", "NodeDictClass", "NodeListClass", "NodeStrClass"]

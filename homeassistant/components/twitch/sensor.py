@@ -1,105 +1,105 @@
 """Support for the Twitch stream status."""
-import logging
 
-import voluptuous as vol
+from typing import Any, override
 
-from homeassistant.components.sensor import PLATFORM_SCHEMA
-from homeassistant.helpers.entity import Entity
-import homeassistant.helpers.config_validation as cv
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.typing import StateType
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-_LOGGER = logging.getLogger(__name__)
+from .coordinator import TwitchConfigEntry, TwitchCoordinator, TwitchUpdate
 
-ATTR_GAME = 'game'
-ATTR_TITLE = 'title'
+ATTR_GAME = "game"
+ATTR_TITLE = "title"
+ATTR_SUBSCRIPTION = "subscribed"
+ATTR_SUBSCRIPTION_GIFTED = "subscription_is_gifted"
+ATTR_SUBSCRIPTION_TIER = "subscription_tier"
+ATTR_FOLLOW = "following"
+ATTR_FOLLOW_SINCE = "following_since"
+ATTR_FOLLOWING = "followers"
+ATTR_VIEWERS = "viewers"
+ATTR_STARTED_AT = "started_at"
+ATTR_CHANNEL_PICTURE = "channel_picture"
 
-CONF_CHANNELS = 'channels'
-CONF_CLIENT_ID = 'client_id'
-ICON = 'mdi:twitch'
+STATE_OFFLINE = "offline"
+STATE_STREAMING = "streaming"
 
-STATE_OFFLINE = 'offline'
-STATE_STREAMING = 'streaming'
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_CLIENT_ID): cv.string,
-    vol.Required(CONF_CHANNELS, default=[]):
-        vol.All(cv.ensure_list, [cv.string]),
-})
-
-
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up the Twitch platform."""
-    from twitch import TwitchClient
-    from requests.exceptions import HTTPError
-
-    channels = config.get(CONF_CHANNELS, [])
-    client = TwitchClient(client_id=config.get(CONF_CLIENT_ID))
-
-    try:
-        client.ingests.get_server_list()
-    except HTTPError:
-        _LOGGER.error("Client ID is not valid")
-        return
-
-    users = client.users.translate_usernames_to_ids(channels)
-
-    add_entities([TwitchSensor(user, client) for user in users], True)
+PARALLEL_UPDATES = 1
 
 
-class TwitchSensor(Entity):
-    """Representation of an Twitch channel."""
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: TwitchConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Initialize entries."""
+    coordinator = entry.runtime_data
 
-    def __init__(self, user, client):
+    async_add_entities(
+        TwitchSensor(coordinator, channel_id) for channel_id in coordinator.data
+    )
+
+
+class TwitchSensor(CoordinatorEntity[TwitchCoordinator], SensorEntity):
+    """Representation of a Twitch channel."""
+
+    _attr_translation_key = "channel"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [STATE_OFFLINE, STATE_STREAMING]
+
+    def __init__(self, coordinator: TwitchCoordinator, channel_id: str) -> None:
         """Initialize the sensor."""
-        self._client = client
-        self._user = user
-        self._channel = self._user.name
-        self._id = self._user.id
-        self._state = STATE_OFFLINE
-        self._preview = self._game = self._title = None
+        super().__init__(coordinator)
+        self.channel_id = channel_id
+        self._attr_unique_id = channel_id
+        self._attr_name = self.channel.name
 
     @property
-    def should_poll(self):
-        """Device should be polled."""
-        return True
+    @override
+    def available(self) -> bool:
+        """Return if entity is available."""
+        return super().available and self.channel_id in self.coordinator.data
 
     @property
-    def name(self):
-        """Return the name of the sensor."""
-        return self._channel
+    def channel(self) -> TwitchUpdate:
+        """Return the channel data."""
+        return self.coordinator.data[self.channel_id]
 
     @property
-    def state(self):
+    @override
+    def native_value(self) -> StateType:
         """Return the state of the sensor."""
-        return self._state
+        return STATE_STREAMING if self.channel.is_streaming else STATE_OFFLINE
 
     @property
-    def entity_picture(self):
-        """Return preview of current game."""
-        return self._preview
-
-    @property
-    def device_state_attributes(self):
+    @override
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes."""
-        if self._state == STATE_STREAMING:
-            return {
-                ATTR_GAME: self._game,
-                ATTR_TITLE: self._title,
-            }
+        channel = self.channel
+        resp = {
+            ATTR_FOLLOWING: channel.followers,
+            ATTR_GAME: channel.game,
+            ATTR_TITLE: channel.title,
+            ATTR_STARTED_AT: channel.started_at,
+            ATTR_VIEWERS: channel.viewers,
+            ATTR_SUBSCRIPTION: False,
+            ATTR_CHANNEL_PICTURE: channel.picture,
+        }
+        if channel.subscribed is not None:
+            resp[ATTR_SUBSCRIPTION] = channel.subscribed
+            resp[ATTR_SUBSCRIPTION_GIFTED] = channel.subscription_gifted
+            resp[ATTR_SUBSCRIPTION_TIER] = channel.subscription_tier
+        resp[ATTR_FOLLOW] = channel.follows
+        if channel.follows:
+            resp[ATTR_FOLLOW_SINCE] = channel.following_since
+        return resp
 
     @property
-    def icon(self):
-        """Icon to use in the frontend, if any."""
-        return ICON
-
-    # pylint: disable=no-member
-    def update(self):
-        """Update device state."""
-        stream = self._client.streams.get_stream_by_user(self._id)
-        if stream:
-            self._game = stream.get('channel').get('game')
-            self._title = stream.get('channel').get('status')
-            self._preview = stream.get('preview').get('medium')
-            self._state = STATE_STREAMING
-        else:
-            self._preview = self._client.users.get_by_id(self._id).get('logo')
-            self._state = STATE_OFFLINE
+    @override
+    def entity_picture(self) -> str | None:
+        """Return the picture of the sensor."""
+        if self.channel.is_streaming:
+            assert self.channel.stream_picture is not None
+            return self.channel.stream_picture
+        return self.channel.picture

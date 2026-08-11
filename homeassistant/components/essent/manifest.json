@@ -1,8 +1,12 @@
 {
   "domain": "essent",
   "name": "Essent",
-  "documentation": "https://www.home-assistant.io/components/essent",
-  "requirements": ["PyEssent==0.12"],
-  "dependencies": [],
-  "codeowners": ["@TheLastProject"]
+  "codeowners": ["@jaapp"],
+  "config_flow": true,
+  "documentation": "https://www.home-assistant.io/integrations/essent",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "quality_scale": "silver",
+  "requirements": ["essent-dynamic-pricing==0.3.1"],
+  "single_config_entry": true
 }

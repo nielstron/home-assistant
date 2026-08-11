@@ -1,8 +1,8 @@
 {
   "domain": "tcp",
-  "name": "Tcp",
-  "documentation": "https://www.home-assistant.io/components/tcp",
-  "requirements": [],
-  "dependencies": [],
-  "codeowners": []
+  "name": "TCP",
+  "codeowners": [],
+  "documentation": "https://www.home-assistant.io/integrations/tcp",
+  "iot_class": "local_polling",
+  "quality_scale": "legacy"
 }

@@ -1,86 +1,127 @@
-"""Support for Rain Bird Irrigation system LNK WiFi Module."""
+"""Support for Rain Bird Irrigation system LNK Wi-Fi Module."""
 
 import logging
+from typing import Any, override
 
-import voluptuous as vol
+from pyrainbird.exceptions import RainbirdApiException, RainbirdDeviceBusyException
 
-from homeassistant.components.switch import PLATFORM_SCHEMA, SwitchDevice
-from homeassistant.const import (
-    CONF_FRIENDLY_NAME, CONF_SCAN_INTERVAL, CONF_SWITCHES, CONF_TRIGGER_TIME,
-    CONF_ZONE)
-from homeassistant.helpers import config_validation as cv
+from homeassistant.components.switch import SwitchEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import DATA_RAINBIRD
+from .const import ATTR_DURATION, CONF_IMPORTED_NAMES, DOMAIN, MANUFACTURER
+from .coordinator import RainbirdUpdateCoordinator
+from .types import RainbirdConfigEntry
 
-DOMAIN = 'rainbird'
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_SWITCHES, default={}): vol.Schema({
-        cv.string: {
-            vol.Optional(CONF_FRIENDLY_NAME): cv.string,
-            vol.Required(CONF_ZONE): cv.string,
-            vol.Required(CONF_TRIGGER_TIME): cv.string,
-            vol.Optional(CONF_SCAN_INTERVAL): cv.string,
-        },
-    }),
-})
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: RainbirdConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up entry for a Rain Bird irrigation switches."""
+    coordinator = config_entry.runtime_data.coordinator
+    async_add_entities(
+        RainBirdSwitch(
+            coordinator,
+            zone,
+            config_entry.options[ATTR_DURATION],
+            config_entry.data.get(CONF_IMPORTED_NAMES, {}).get(str(zone)),
+        )
+        for zone in coordinator.data.zones
+    )
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up Rain Bird switches over a Rain Bird controller."""
-    controller = hass.data[DATA_RAINBIRD]
-
-    devices = []
-    for dev_id, switch in config.get(CONF_SWITCHES).items():
-        devices.append(RainBirdSwitch(controller, switch, dev_id))
-    add_entities(devices, True)
-
-
-class RainBirdSwitch(SwitchDevice):
+class RainBirdSwitch(CoordinatorEntity[RainbirdUpdateCoordinator], SwitchEntity):
     """Representation of a Rain Bird switch."""
 
-    def __init__(self, rb, dev, dev_id):
+    def __init__(
+        self,
+        coordinator: RainbirdUpdateCoordinator,
+        zone: int,
+        duration_minutes: int,
+        imported_name: str | None,
+    ) -> None:
         """Initialize a Rain Bird Switch Device."""
-        self._rainbird = rb
-        self._devid = dev_id
-        self._zone = int(dev.get(CONF_ZONE))
-        self._name = dev.get(CONF_FRIENDLY_NAME,
-                             "Sprinkler {}".format(self._zone))
-        self._state = None
-        self._duration = dev.get(CONF_TRIGGER_TIME)
-        self._attributes = {
-            "duration": self._duration,
-            "zone": self._zone
-        }
+        super().__init__(coordinator)
+        self._zone = zone
+        _LOGGER.debug("coordinator.unique_id=%s", coordinator.unique_id)
+        if coordinator.unique_id is not None:
+            self._attr_unique_id = f"{coordinator.unique_id}-{zone}"
+        device_name = f"{MANUFACTURER} Sprinkler {zone}"
+        if imported_name:
+            self._attr_name = imported_name
+            self._attr_has_entity_name = False
+        else:
+            self._attr_name = None if coordinator.unique_id is not None else device_name
+            self._attr_has_entity_name = True
+        self._duration_minutes = duration_minutes
+        if coordinator.unique_id is not None and self._attr_unique_id is not None:
+            self._attr_device_info = DeviceInfo(
+                name=device_name,
+                identifiers={(DOMAIN, self._attr_unique_id)},
+                manufacturer=MANUFACTURER,
+                via_device_id=dr.async_get_device_id_by_identifier(
+                    coordinator.hass,
+                    (DOMAIN, coordinator.unique_id),
+                    config_entry_id=coordinator.config_entry.entry_id,
+                ),
+            )
 
     @property
-    def device_state_attributes(self):
+    @override
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Return state attributes."""
-        return self._attributes
+        return {"zone": self._zone}
 
-    @property
-    def name(self):
-        """Get the name of the switch."""
-        return self._name
-
-    def turn_on(self, **kwargs):
+    @override
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the switch on."""
-        self._rainbird.startIrrigation(int(self._zone), int(self._duration))
+        try:
+            await self.coordinator.controller.irrigate_zone(
+                int(self._zone),
+                int(kwargs.get(ATTR_DURATION, self._duration_minutes)),
+            )
+        except RainbirdDeviceBusyException as err:
+            raise HomeAssistantError(
+                "Rain Bird device is busy; Wait and try again"
+            ) from err
+        except RainbirdApiException as err:
+            raise HomeAssistantError("Rain Bird device failure") from err
 
-    def turn_off(self, **kwargs):
+        # The device reflects the old state for a few moments. Update the
+        # state manually and trigger a refresh after a short debounced delay.
+        self.coordinator.data.active_zones.add(self._zone)
+        self.async_write_ha_state()
+        await self.coordinator.async_request_refresh()
+
+    @override
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the switch off."""
-        self._rainbird.stopIrrigation()
+        try:
+            await self.coordinator.controller.stop_irrigation()
+        except RainbirdDeviceBusyException as err:
+            raise HomeAssistantError(
+                "Rain Bird device is busy; Wait and try again"
+            ) from err
+        except RainbirdApiException as err:
+            raise HomeAssistantError("Rain Bird device failure") from err
 
-    def get_device_status(self):
-        """Get the status of the switch from Rain Bird Controller."""
-        return self._rainbird.currentIrrigation() == self._zone
-
-    def update(self):
-        """Update switch status."""
-        self._state = self.get_device_status()
+        # The device reflects the old state for a few moments. Update the
+        # state manually and trigger a refresh after a short debounced delay.
+        if self.is_on:
+            self.coordinator.data.active_zones.remove(self._zone)
+        self.async_write_ha_state()
+        await self.coordinator.async_request_refresh()
 
     @property
-    def is_on(self):
+    @override
+    def is_on(self) -> bool:
         """Return true if switch is on."""
-        return self._state
+        return self._zone in self.coordinator.data.active_zones

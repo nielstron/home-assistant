@@ -1,38 +1,51 @@
 """Support for Velbus switches."""
-import logging
 
-from homeassistant.components.switch import SwitchDevice
+from typing import Any, override
 
-from . import DOMAIN as VELBUS_DOMAIN, VelbusEntity
+from velbusaio.channels import Relay as VelbusRelay
 
-_LOGGER = logging.getLogger(__name__)
+from homeassistant.components.switch import SwitchEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from . import VelbusConfigEntry
+from .entity import VelbusEntity, api_call
 
-async def async_setup_platform(
-        hass, config, async_add_entities, discovery_info=None):
-    """Set up the Velbus Switch platform."""
-    if discovery_info is None:
-        return
-    switches = []
-    for switch in discovery_info:
-        module = hass.data[VELBUS_DOMAIN].get_module(switch[0])
-        channel = switch[1]
-        switches.append(VelbusSwitch(module, channel))
-    async_add_entities(switches)
+PARALLEL_UPDATES = 0
 
 
-class VelbusSwitch(VelbusEntity, SwitchDevice):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: VelbusConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up Velbus switch based on config_entry."""
+    await entry.runtime_data.scan_task
+    async_add_entities(
+        VelbusSwitch(channel)
+        for channel in entry.runtime_data.controller.get_all_switch()
+    )
+
+
+class VelbusSwitch(VelbusEntity, SwitchEntity):
     """Representation of a switch."""
 
+    _channel: VelbusRelay
+
     @property
-    def is_on(self):
+    @override
+    def is_on(self) -> bool:
         """Return true if the switch is on."""
-        return self._module.is_on(self._channel)
+        return self._channel.is_on()
 
-    def turn_on(self, **kwargs):
+    @api_call
+    @override
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Instruct the switch to turn on."""
-        self._module.turn_on(self._channel)
+        await self._channel.turn_on()
 
-    def turn_off(self, **kwargs):
+    @api_call
+    @override
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Instruct the switch to turn off."""
-        self._module.turn_off(self._channel)
+        await self._channel.turn_off()

@@ -1,10 +1,11 @@
 {
   "domain": "coinbase",
   "name": "Coinbase",
-  "documentation": "https://www.home-assistant.io/components/coinbase",
-  "requirements": [
-    "coinbase==2.1.0"
-  ],
-  "dependencies": [],
-  "codeowners": []
+  "codeowners": ["@tombrien"],
+  "config_flow": true,
+  "documentation": "https://www.home-assistant.io/integrations/coinbase",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "loggers": ["coinbase"],
+  "requirements": ["coinbase-advanced-py==1.2.2"]
 }

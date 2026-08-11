@@ -1,46 +1,57 @@
 """Support for Lupusec Security System switches."""
+
 from datetime import timedelta
-import logging
+from functools import partial
+from typing import Any, override
 
-from homeassistant.components.switch import SwitchDevice
+import lupupy.constants as CONST
 
-from . import DOMAIN as LUPUSEC_DOMAIN, LupusecDevice
+from homeassistant.components.switch import SwitchEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+
+from . import LupusecConfigEntry
+from .entity import LupusecBaseSensor
 
 SCAN_INTERVAL = timedelta(seconds=2)
 
-_LOGGER = logging.getLogger(__name__)
 
-
-def setup_platform(hass, config, add_entities, discovery_info=None):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: LupusecConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     """Set up Lupusec switch devices."""
-    if discovery_info is None:
-        return
 
-    import lupupy.constants as CONST
+    data = config_entry.runtime_data
 
-    data = hass.data[LUPUSEC_DOMAIN]
+    device_types = CONST.TYPE_SWITCH
 
-    devices = []
+    partial_func = partial(data.get_devices, generic_type=device_types)
+    devices = await hass.async_add_executor_job(partial_func)
 
-    for device in data.lupusec.get_devices(generic_type=CONST.TYPE_SWITCH):
-
-        devices.append(LupusecSwitch(data, device))
-
-    add_entities(devices)
+    async_add_entities(
+        LupusecSwitch(hass, device, config_entry.entry_id) for device in devices
+    )
 
 
-class LupusecSwitch(LupusecDevice, SwitchDevice):
+class LupusecSwitch(LupusecBaseSensor, SwitchEntity):
     """Representation of a Lupusec switch."""
 
-    def turn_on(self, **kwargs):
+    _attr_name = None
+
+    @override
+    def turn_on(self, **kwargs: Any) -> None:
         """Turn on the device."""
         self._device.switch_on()
 
-    def turn_off(self, **kwargs):
+    @override
+    def turn_off(self, **kwargs: Any) -> None:
         """Turn off the device."""
         self._device.switch_off()
 
     @property
-    def is_on(self):
+    @override
+    def is_on(self) -> bool:
         """Return true if device is on."""
         return self._device.is_on

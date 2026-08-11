@@ -1,8 +1,8 @@
 {
   "domain": "worxlandroid",
-  "name": "Worxlandroid",
-  "documentation": "https://www.home-assistant.io/components/worxlandroid",
-  "requirements": [],
-  "dependencies": [],
-  "codeowners": []
+  "name": "Worx Landroid",
+  "codeowners": [],
+  "documentation": "https://www.home-assistant.io/integrations/worxlandroid",
+  "iot_class": "local_polling",
+  "quality_scale": "legacy"
 }

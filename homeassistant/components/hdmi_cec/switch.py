@@ -1,67 +1,68 @@
 """Support for HDMI CEC devices as switches."""
+
 import logging
+from typing import Any, override
 
-from homeassistant.components.switch import DOMAIN, SwitchDevice
-from homeassistant.const import STATE_OFF, STATE_ON, STATE_STANDBY
+from pycec.commands import CecCommand
+from pycec.const import CMD_STANDBY, POWER_OFF, POWER_ON
 
-from . import ATTR_NEW, CecDevice
+from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN, SwitchEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+
+from .const import ATTR_NEW, DOMAIN
+from .entity import CecEntity
 
 _LOGGER = logging.getLogger(__name__)
 
-ENTITY_ID_FORMAT = DOMAIN + '.{}'
+ENTITY_ID_FORMAT = SWITCH_DOMAIN + ".{}"
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
+async def async_setup_platform(
+    hass: HomeAssistant,
+    config: ConfigType,
+    async_add_entities: AddEntitiesCallback,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> None:
     """Find and return HDMI devices as switches."""
-    if ATTR_NEW in discovery_info:
-        _LOGGER.info("Setting up HDMI devices %s", discovery_info[ATTR_NEW])
+    if discovery_info and ATTR_NEW in discovery_info:
+        _LOGGER.debug("Setting up HDMI devices %s", discovery_info[ATTR_NEW])
         entities = []
         for device in discovery_info[ATTR_NEW]:
-            hdmi_device = hass.data.get(device)
-            entities.append(CecSwitchDevice(
-                hdmi_device, hdmi_device.logical_address,
-            ))
-        add_entities(entities, True)
+            hdmi_device = hass.data[DOMAIN][device]
+            entities.append(CecSwitchEntity(hdmi_device, hdmi_device.logical_address))
+        async_add_entities(entities, True)
 
 
-class CecSwitchDevice(CecDevice, SwitchDevice):
+class CecSwitchEntity(CecEntity, SwitchEntity):
     """Representation of a HDMI device as a Switch."""
 
     def __init__(self, device, logical) -> None:
         """Initialize the HDMI device."""
-        CecDevice.__init__(self, device, logical)
-        self.entity_id = "%s.%s_%s" % (
-            DOMAIN, 'hdmi', hex(self._logical_address)[2:])
+        CecEntity.__init__(self, device, logical)
+        self.entity_id = f"{SWITCH_DOMAIN}.hdmi_{hex(self._logical_address)[2:]}"
 
-    def turn_on(self, **kwargs) -> None:
+    @override
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn device on."""
         self._device.turn_on()
-        self._state = STATE_ON
+        self._attr_is_on = True
+        self.async_write_ha_state()
 
-    def turn_off(self, **kwargs) -> None:
+    @override
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn device off."""
-        self._device.turn_off()
-        self._state = STATE_ON
+        self._device.send_command(CecCommand(CMD_STANDBY, dst=self._logical_address))
+        self._attr_is_on = False
+        self.async_write_ha_state()
 
-    def toggle(self, **kwargs):
-        """Toggle the entity."""
-        self._device.toggle()
-        if self._state == STATE_ON:
-            self._state = STATE_OFF
+    async def async_update(self) -> None:
+        """Update device status."""
+        device = self._device
+        if device.power_status in {POWER_OFF, 3}:
+            self._attr_is_on = False
+        elif device.power_status in {POWER_ON, 4}:
+            self._attr_is_on = True
         else:
-            self._state = STATE_ON
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if entity is on."""
-        return self._state == STATE_ON
-
-    @property
-    def is_standby(self):
-        """Return true if device is in standby."""
-        return self._state == STATE_OFF or self._state == STATE_STANDBY
-
-    @property
-    def state(self) -> str:
-        """Return the cached state of device."""
-        return self._state
+            _LOGGER.warning("Unknown state: %d", device.power_status)

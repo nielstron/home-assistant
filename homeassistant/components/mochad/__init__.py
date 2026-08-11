@@ -1,55 +1,64 @@
 """Support for CM15A/CM19A X10 Controller using mochad daemon."""
+
 import logging
 import threading
 
+from pymochad import controller, exceptions
 import voluptuous as vol
 
-import homeassistant.helpers.config_validation as cv
 from homeassistant.const import (
-    EVENT_HOMEASSISTANT_START, EVENT_HOMEASSISTANT_STOP)
-from homeassistant.const import (CONF_HOST, CONF_PORT)
+    CONF_HOST,
+    CONF_PORT,
+    EVENT_HOMEASSISTANT_START,
+    EVENT_HOMEASSISTANT_STOP,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.typing import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
 
-CONTROLLER = None
+CONF_COMM_TYPE = "comm_type"
 
-CONF_COMM_TYPE = 'comm_type'
-
-DOMAIN = 'mochad'
+DOMAIN = "mochad"
 
 REQ_LOCK = threading.Lock()
 
-CONFIG_SCHEMA = vol.Schema({
-    DOMAIN: vol.Schema({
-        vol.Optional(CONF_HOST, default='localhost'): cv.string,
-        vol.Optional(CONF_PORT, default=1099): cv.port,
-    })
-}, extra=vol.ALLOW_EXTRA)
+CONFIG_SCHEMA = vol.Schema(
+    {
+        DOMAIN: vol.Schema(
+            {
+                vol.Optional(CONF_HOST, default="localhost"): cv.string,
+                vol.Optional(CONF_PORT, default=1099): cv.port,
+            }
+        )
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 
 
-def setup(hass, config):
+def setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the mochad component."""
     conf = config[DOMAIN]
     host = conf.get(CONF_HOST)
     port = conf.get(CONF_PORT)
 
-    from pymochad import exceptions
-
-    global CONTROLLER
     try:
-        CONTROLLER = MochadCtrl(host, port)
+        mochad_controller = MochadCtrl(host, port)
     except exceptions.ConfigurationError:
-        _LOGGER.exception()
+        _LOGGER.exception("Unexpected exception")
         return False
 
     def stop_mochad(event):
         """Stop the Mochad service."""
-        CONTROLLER.disconnect()
+        mochad_controller.disconnect()
 
     def start_mochad(event):
         """Start the Mochad service."""
         hass.bus.listen_once(EVENT_HOMEASSISTANT_STOP, stop_mochad)
+
     hass.bus.listen_once(EVENT_HOMEASSISTANT_START, start_mochad)
+    hass.data[DOMAIN] = mochad_controller
 
     return True
 
@@ -59,11 +68,9 @@ class MochadCtrl:
 
     def __init__(self, host, port):
         """Initialize a PyMochad controller."""
-        super(MochadCtrl, self).__init__()
+        super().__init__()
         self._host = host
         self._port = port
-
-        from pymochad import controller
 
         self.ctrl = controller.PyMochad(server=self._host, port=self._port)
 

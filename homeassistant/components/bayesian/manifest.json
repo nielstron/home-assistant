@@ -1,8 +1,10 @@
 {
   "domain": "bayesian",
   "name": "Bayesian",
-  "documentation": "https://www.home-assistant.io/components/bayesian",
-  "requirements": [],
-  "dependencies": [],
-  "codeowners": []
+  "codeowners": ["@HarvsG"],
+  "config_flow": true,
+  "documentation": "https://www.home-assistant.io/integrations/bayesian",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "quality_scale": "internal"
 }

@@ -1,94 +1,144 @@
 """Support for Verisure cameras."""
+
 import errno
-import logging
 import os
+from typing import override
+
+from verisure import Error as VerisureError
 
 from homeassistant.components.camera import Camera
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import (
+    AddConfigEntryEntitiesCallback,
+    async_get_current_platform,
+)
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import CONF_SMARTCAM, HUB as hub
-
-_LOGGER = logging.getLogger(__name__)
-
-
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up the Verisure Camera."""
-    if not int(hub.config.get(CONF_SMARTCAM, 1)):
-        return False
-    directory_path = hass.config.config_dir
-    if not os.access(directory_path, os.R_OK):
-        _LOGGER.error("file path %s is not readable", directory_path)
-        return False
-    hub.update_overview()
-    smartcams = []
-    smartcams.extend([
-        VerisureSmartcam(hass, device_label, directory_path)
-        for device_label in hub.get(
-            "$.customerImageCameras[*].deviceLabel")])
-    add_entities(smartcams)
+from .const import CONF_GIID, DOMAIN, LOGGER, SERVICE_CAPTURE_SMARTCAM
+from .coordinator import VerisureConfigEntry, VerisureDataUpdateCoordinator
 
 
-class VerisureSmartcam(Camera):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: VerisureConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up Verisure sensors based on a config entry."""
+    coordinator = entry.runtime_data
+
+    platform = async_get_current_platform()
+    platform.async_register_entity_service(
+        SERVICE_CAPTURE_SMARTCAM,
+        None,
+        VerisureSmartcam.capture_smartcam.__name__,
+    )
+
+    async_add_entities(
+        VerisureSmartcam(coordinator, serial_number, hass.config.config_dir)
+        for serial_number in coordinator.data["cameras"]
+    )
+
+
+class VerisureSmartcam(CoordinatorEntity[VerisureDataUpdateCoordinator], Camera):
     """Representation of a Verisure camera."""
 
-    def __init__(self, hass, device_label, directory_path):
+    _attr_has_entity_name = True
+    _attr_name = None
+
+    def __init__(
+        self,
+        coordinator: VerisureDataUpdateCoordinator,
+        serial_number: str,
+        directory_path: str,
+    ) -> None:
         """Initialize Verisure File Camera component."""
-        super().__init__()
+        super().__init__(coordinator)
+        Camera.__init__(self)
 
-        self._device_label = device_label
+        self._attr_unique_id = serial_number
+
+        self.serial_number = serial_number
         self._directory_path = directory_path
-        self._image = None
-        self._image_id = None
-        hass.bus.listen_once(EVENT_HOMEASSISTANT_STOP,
-                             self.delete_image)
+        self._image: str | None = None
+        self._image_id: str | None = None
+        area = coordinator.data["cameras"][serial_number]["device"]["area"]
+        self._attr_device_info = DeviceInfo(
+            name=area,
+            manufacturer="Verisure",
+            model="SmartCam",
+            identifiers={(DOMAIN, serial_number)},
+            via_device_id=dr.async_get_device_id_by_identifier(
+                coordinator.hass,
+                (DOMAIN, coordinator.config_entry.data[CONF_GIID]),
+                config_entry_id=coordinator.config_entry.entry_id,
+            ),
+            configuration_url="https://mypages.verisure.com",
+        )
 
-    def camera_image(self):
+    @override
+    def camera_image(
+        self, width: int | None = None, height: int | None = None
+    ) -> bytes | None:
         """Return image response."""
         self.check_imagelist()
         if not self._image:
-            _LOGGER.debug("No image to display")
-            return
-        _LOGGER.debug("Trying to open %s", self._image)
-        with open(self._image, 'rb') as file:
+            LOGGER.debug("No image to display")
+            return None
+        LOGGER.debug("Trying to open %s", self._image)
+        with open(self._image, "rb") as file:
             return file.read()
 
-    def check_imagelist(self):
+    def check_imagelist(self) -> None:
         """Check the contents of the image list."""
-        hub.update_smartcam_imageseries()
-        image_ids = hub.get_image_info(
-            "$.imageSeries[?(@.deviceLabel=='%s')].image[0].imageId",
-            self._device_label)
-        if not image_ids:
+        self.coordinator.update_smartcam_imageseries()
+
+        new_image = None
+        for image in self.coordinator.imageseries:
+            if image["deviceLabel"] == self.serial_number:
+                new_image = image
+                break
+
+        if not new_image:
             return
-        new_image_id = image_ids[0]
-        if new_image_id in ('-1', self._image_id):
-            _LOGGER.debug("The image is the same, or loading image_id")
+
+        new_image_id = new_image["mediaId"]
+        if new_image_id in ("-1", self._image_id):
+            LOGGER.debug("The image is the same, or loading image_id")
             return
-        _LOGGER.debug("Download new image %s", new_image_id)
-        new_image_path = os.path.join(
-            self._directory_path, '{}{}'.format(new_image_id, '.jpg'))
-        hub.session.download_image(
-            self._device_label, new_image_id, new_image_path)
-        _LOGGER.debug("Old image_id=%s", self._image_id)
-        self.delete_image(self)
+
+        LOGGER.debug("Download new image %s", new_image_id)
+        new_image_path = os.path.join(self._directory_path, f"{new_image_id}.jpg")
+        new_image_url = new_image["contentUrl"]
+        self.coordinator.verisure.download_image(new_image_url, new_image_path)
+        LOGGER.debug("Old image_id=%s", self._image_id)
+        self.delete_image()
 
         self._image_id = new_image_id
         self._image = new_image_path
 
-    def delete_image(self, event):
+    def delete_image(self, _=None) -> None:
         """Delete an old image."""
-        remove_image = os.path.join(
-            self._directory_path, '{}{}'.format(self._image_id, '.jpg'))
+        remove_image = os.path.join(self._directory_path, f"{self._image_id}.jpg")
         try:
             os.remove(remove_image)
-            _LOGGER.debug("Deleting old image %s", remove_image)
+            LOGGER.debug("Deleting old image %s", remove_image)
         except OSError as error:
             if error.errno != errno.ENOENT:
                 raise
 
-    @property
-    def name(self):
-        """Return the name of this camera."""
-        return hub.get_first(
-            "$.customerImageCameras[?(@.deviceLabel=='%s')].area",
-            self._device_label)
+    def capture_smartcam(self) -> None:
+        """Capture a new picture from a smartcam."""
+        try:
+            self.coordinator.smartcam_capture(self.serial_number)
+            LOGGER.debug("Capturing new image from %s", self.serial_number)
+        except VerisureError as ex:
+            LOGGER.error("Could not capture image, %s", ex)
+
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Entity added to Home Assistant."""
+        await super().async_added_to_hass()
+        self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, self.delete_image)

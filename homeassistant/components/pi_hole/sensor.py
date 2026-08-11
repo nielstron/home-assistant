@@ -1,166 +1,178 @@
 """Support for getting statistical data from a Pi-hole system."""
-from datetime import timedelta
-import logging
 
-import voluptuous as vol
+from collections.abc import Mapping
+from typing import Any, override
 
-from homeassistant.components.sensor import PLATFORM_SCHEMA
-from homeassistant.const import (
-    CONF_HOST, CONF_MONITORED_CONDITIONS, CONF_NAME, CONF_SSL, CONF_VERIFY_SSL)
-from homeassistant.exceptions import PlatformNotReady
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
-import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.entity import Entity
-from homeassistant.util import Throttle
+from hole import Hole
 
-_LOGGER = logging.getLogger(__name__)
+from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
+from homeassistant.const import PERCENTAGE
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.typing import StateType
 
-ATTR_BLOCKED_DOMAINS = 'domains_blocked'
-ATTR_PERCENTAGE_TODAY = 'percentage_today'
-ATTR_QUERIES_TODAY = 'queries_today'
+from .coordinator import PiHoleConfigEntry, PiHoleUpdateCoordinator
+from .entity import PiHoleEntity
 
-CONF_LOCATION = 'location'
-DEFAULT_HOST = 'localhost'
+SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
+    SensorEntityDescription(
+        key="ads_blocked_today",
+        translation_key="ads_blocked_today",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="ads_percentage_today",
+        translation_key="ads_percentage_today",
+        native_unit_of_measurement=PERCENTAGE,
+        suggested_display_precision=1,
+    ),
+    SensorEntityDescription(
+        key="clients_ever_seen",
+        translation_key="clients_ever_seen",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="dns_queries_today",
+        translation_key="dns_queries_today",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="domains_being_blocked",
+        translation_key="domains_being_blocked",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="queries_cached",
+        translation_key="queries_cached",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="queries_forwarded",
+        translation_key="queries_forwarded",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="unique_clients",
+        translation_key="unique_clients",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="unique_domains",
+        translation_key="unique_domains",
+        suggested_display_precision=0,
+    ),
+)
 
-DEFAULT_LOCATION = 'admin'
-DEFAULT_METHOD = 'GET'
-DEFAULT_NAME = 'Pi-Hole'
-DEFAULT_SSL = False
-DEFAULT_VERIFY_SSL = True
+SENSOR_TYPES_V6: tuple[SensorEntityDescription, ...] = (
+    SensorEntityDescription(
+        key="queries.blocked",
+        translation_key="ads_blocked",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="queries.percent_blocked",
+        translation_key="percent_ads_blocked",
+        native_unit_of_measurement=PERCENTAGE,
+        suggested_display_precision=2,
+    ),
+    SensorEntityDescription(
+        key="clients.total",
+        translation_key="clients_ever_seen",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="queries.total",
+        translation_key="dns_queries",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="gravity.domains_being_blocked",
+        translation_key="domains_being_blocked",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="queries.cached",
+        translation_key="queries_cached",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="queries.forwarded",
+        translation_key="queries_forwarded",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="clients.active",
+        translation_key="unique_clients",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="queries.unique_domains",
+        translation_key="unique_domains",
+        suggested_display_precision=0,
+    ),
+)
 
-MIN_TIME_BETWEEN_UPDATES = timedelta(minutes=5)
 
-MONITORED_CONDITIONS = {
-    'ads_blocked_today':
-        ['Ads Blocked Today', 'ads', 'mdi:close-octagon-outline'],
-    'ads_percentage_today':
-        ['Ads Percentage Blocked Today', '%', 'mdi:close-octagon-outline'],
-    'clients_ever_seen':
-        ['Seen Clients', 'clients', 'mdi:account-outline'],
-    'dns_queries_today':
-        ['DNS Queries Today', 'queries', 'mdi:comment-question-outline'],
-    'domains_being_blocked':
-        ['Domains Blocked', 'domains', 'mdi:block-helper'],
-    'queries_cached':
-        ['DNS Queries Cached', 'queries', 'mdi:comment-question-outline'],
-    'queries_forwarded':
-        ['DNS Queries Forwarded', 'queries', 'mdi:comment-question-outline'],
-    'unique_clients':
-        ['DNS Unique Clients', 'clients', 'mdi:account-outline'],
-    'unique_domains':
-        ['DNS Unique Domains', 'domains', 'mdi:domain'],
-}
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Optional(CONF_HOST, default=DEFAULT_HOST): cv.string,
-    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-    vol.Optional(CONF_SSL, default=DEFAULT_SSL): cv.boolean,
-    vol.Optional(CONF_LOCATION, default=DEFAULT_LOCATION): cv.string,
-    vol.Optional(CONF_VERIFY_SSL, default=DEFAULT_VERIFY_SSL): cv.boolean,
-    vol.Optional(CONF_MONITORED_CONDITIONS,
-                 default=['ads_blocked_today']):
-    vol.All(cv.ensure_list, [vol.In(MONITORED_CONDITIONS)]),
-})
-
-
-async def async_setup_platform(
-        hass, config, async_add_entities, discovery_info=None):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: PiHoleConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     """Set up the Pi-hole sensor."""
-    from hole import Hole
-
-    name = config.get(CONF_NAME)
-    host = config.get(CONF_HOST)
-    use_tls = config.get(CONF_SSL)
-    location = config.get(CONF_LOCATION)
-    verify_tls = config.get(CONF_VERIFY_SSL)
-
-    session = async_get_clientsession(hass, verify_tls)
-    pi_hole = PiHoleData(Hole(
-        host, hass.loop, session, location=location, tls=use_tls))
-
-    await pi_hole.async_update()
-
-    if pi_hole.api.data is None:
-        raise PlatformNotReady
-
-    sensors = [PiHoleSensor(pi_hole, name, condition)
-               for condition in config[CONF_MONITORED_CONDITIONS]]
-
+    name = entry.title
+    hole_data = entry.runtime_data
+    sensors = [
+        PiHoleSensor(
+            hole_data.api,
+            hole_data.coordinator,
+            name,
+            entry.entry_id,
+            description,
+        )
+        for description in (
+            SENSOR_TYPES if hole_data.api_version == 5 else SENSOR_TYPES_V6
+        )
+    ]
     async_add_entities(sensors, True)
 
 
-class PiHoleSensor(Entity):
+class PiHoleSensor(PiHoleEntity, SensorEntity):
     """Representation of a Pi-hole sensor."""
 
-    def __init__(self, pi_hole, name, condition):
+    entity_description: SensorEntityDescription
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        api: Hole,
+        coordinator: PiHoleUpdateCoordinator,
+        name: str,
+        server_unique_id: str,
+        description: SensorEntityDescription,
+    ) -> None:
         """Initialize a Pi-hole sensor."""
-        self.pi_hole = pi_hole
-        self._name = name
-        self._condition = condition
+        super().__init__(api, coordinator, name, server_unique_id)
+        self.entity_description = description
 
-        variable_info = MONITORED_CONDITIONS[condition]
-        self._condition_name = variable_info[0]
-        self._unit_of_measurement = variable_info[1]
-        self._icon = variable_info[2]
-        self.data = {}
+        self._attr_unique_id = f"{self._server_unique_id}/{description.key}"
 
     @property
-    def name(self):
-        """Return the name of the sensor."""
-        return "{} {}".format(self._name, self._condition_name)
-
-    @property
-    def icon(self):
-        """Icon to use in the frontend, if any."""
-        return self._icon
-
-    @property
-    def unit_of_measurement(self):
-        """Return the unit the value is expressed in."""
-        return self._unit_of_measurement
-
-    @property
-    def state(self):
+    @override
+    def native_value(self) -> StateType:
         """Return the state of the device."""
-        try:
-            return round(self.data[self._condition], 2)
-        except TypeError:
-            return self.data[self._condition]
-
-    @property
-    def device_state_attributes(self):
-        """Return the state attributes of the Pi-Hole."""
-        return {
-            ATTR_BLOCKED_DOMAINS: self.data['domains_being_blocked'],
-        }
-
-    @property
-    def available(self):
-        """Could the device be accessed during the last update call."""
-        return self.pi_hole.available
-
-    async def async_update(self):
-        """Get the latest data from the Pi-hole API."""
-        await self.pi_hole.async_update()
-        self.data = self.pi_hole.api.data
+        return get_nested(self.api.data, self.entity_description.key)
 
 
-class PiHoleData:
-    """Get the latest data and update the states."""
+def get_nested(data: Mapping[str, Any], key: str) -> float | int:
+    """Get a value from a nested dictionary using a dot-separated key.
 
-    def __init__(self, api):
-        """Initialize the data object."""
-        self.api = api
-        self.available = True
-
-    @Throttle(MIN_TIME_BETWEEN_UPDATES)
-    async def async_update(self):
-        """Get the latest data from the Pi-hole."""
-        from hole.exceptions import HoleError
-
-        try:
-            await self.api.get_data()
-            self.available = True
-        except HoleError:
-            _LOGGER.error("Unable to fetch data from Pi-hole")
-            self.available = False
+    Ensures type safety as it iterates into the dict.
+    """
+    current: Any = data
+    for part in key.split("."):
+        if not isinstance(current, Mapping):
+            raise KeyError(f"Cannot access '{part}' in non-dict {current!r}")
+        current = current[part]
+    if not isinstance(current, (float, int)):
+        raise TypeError(f"Value at '{key}' is not a float or int: {current!r}")
+    return current

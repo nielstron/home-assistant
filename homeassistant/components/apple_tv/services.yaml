@@ -1,5 +1,31 @@
-apple_tv_authenticate:
-  description: Start AirPlay device authentication.
+set_keyboard_text:
   fields:
-    entity_id: {description: Name(s) of entities to authenticate with., example: media_player.apple_tv}
-apple_tv_scan: {description: Scan for Apple TV devices.}
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: apple_tv
+    text:
+      required: true
+      selector:
+        text:
+
+append_keyboard_text:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: apple_tv
+    text:
+      required: true
+      selector:
+        text:
+
+clear_keyboard_text:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: apple_tv

@@ -1,55 +1,135 @@
 """Support for Verisure binary sensors."""
-import logging
 
-from homeassistant.components.binary_sensor import BinarySensorDevice
+from typing import Any, override
 
-from . import CONF_DOOR_WINDOW, HUB as hub
+from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
+    BinarySensorEntity,
+)
+from homeassistant.const import ATTR_LAST_TRIP_TIME, EntityCategory
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
-_LOGGER = logging.getLogger(__name__)
-
-
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up the Verisure binary sensors."""
-    sensors = []
-    hub.update_overview()
-
-    if int(hub.config.get(CONF_DOOR_WINDOW, 1)):
-        sensors.extend([
-            VerisureDoorWindowSensor(device_label)
-            for device_label in hub.get(
-                "$.doorWindow.doorWindowDevice[*].deviceLabel")])
-    add_entities(sensors)
+from .const import CONF_GIID, DOMAIN
+from .coordinator import VerisureConfigEntry, VerisureDataUpdateCoordinator
 
 
-class VerisureDoorWindowSensor(BinarySensorDevice):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: VerisureConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up Verisure binary sensors based on a config entry."""
+    coordinator = entry.runtime_data
+
+    sensors: list[Entity] = [VerisureEthernetStatus(coordinator)]
+
+    sensors.extend(
+        VerisureDoorWindowSensor(coordinator, serial_number)
+        for serial_number in coordinator.data["door_window"]
+    )
+
+    async_add_entities(sensors)
+
+
+class VerisureDoorWindowSensor(
+    CoordinatorEntity[VerisureDataUpdateCoordinator], BinarySensorEntity
+):
     """Representation of a Verisure door window sensor."""
 
-    def __init__(self, device_label):
+    _attr_device_class = BinarySensorDeviceClass.OPENING
+    _attr_has_entity_name = True
+
+    def __init__(
+        self, coordinator: VerisureDataUpdateCoordinator, serial_number: str
+    ) -> None:
         """Initialize the Verisure door window sensor."""
-        self._device_label = device_label
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{serial_number}_door_window"
+        self.serial_number = serial_number
+        area = coordinator.data["door_window"][serial_number]["area"]
+        self._attr_device_info = DeviceInfo(
+            name=area,
+            manufacturer="Verisure",
+            model="Shock Sensor Detector",
+            identifiers={(DOMAIN, serial_number)},
+            via_device_id=dr.async_get_device_id_by_identifier(
+                coordinator.hass,
+                (DOMAIN, coordinator.config_entry.data[CONF_GIID]),
+                config_entry_id=coordinator.config_entry.entry_id,
+            ),
+            configuration_url="https://mypages.verisure.com",
+        )
 
     @property
-    def name(self):
-        """Return the name of the binary sensor."""
-        return hub.get_first(
-            "$.doorWindow.doorWindowDevice[?(@.deviceLabel=='%s')].area",
-            self._device_label)
-
-    @property
-    def is_on(self):
+    @override
+    def is_on(self) -> bool:
         """Return the state of the sensor."""
-        return hub.get_first(
-            "$.doorWindow.doorWindowDevice[?(@.deviceLabel=='%s')].state",
-            self._device_label) == "OPEN"
+        return (
+            self.coordinator.data["door_window"][self.serial_number]["state"] == "OPEN"
+        )
 
     @property
-    def available(self):
+    @override
+    def available(self) -> bool:
         """Return True if entity is available."""
-        return hub.get_first(
-            "$.doorWindow.doorWindowDevice[?(@.deviceLabel=='%s')]",
-            self._device_label) is not None
+        return (
+            super().available
+            and self.serial_number in self.coordinator.data["door_window"]
+        )
 
-    # pylint: disable=no-self-use
-    def update(self):
-        """Update the state of the sensor."""
-        hub.update_overview()
+    @property
+    @override
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes of the sensor."""
+        return {
+            ATTR_LAST_TRIP_TIME: dt_util.parse_datetime(
+                self.coordinator.data["door_window"][self.serial_number]["reportTime"]
+            )
+        }
+
+
+class VerisureEthernetStatus(
+    CoordinatorEntity[VerisureDataUpdateCoordinator], BinarySensorEntity
+):
+    """Representation of a Verisure VBOX internet status."""
+
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_has_entity_name = True
+    _attr_translation_key = "ethernet"
+
+    @property
+    @override
+    def unique_id(self) -> str:
+        """Return the unique ID for this entity."""
+        return f"{self.coordinator.config_entry.data[CONF_GIID]}_ethernet"
+
+    @property
+    @override
+    def device_info(self) -> DeviceInfo:
+        """Return device information about this entity."""
+        return DeviceInfo(
+            name="Verisure Alarm",
+            manufacturer="Verisure",
+            model="VBox",
+            identifiers={(DOMAIN, self.coordinator.config_entry.data[CONF_GIID])},
+            configuration_url="https://mypages.verisure.com",
+        )
+
+    @property
+    @override
+    def is_on(self) -> bool:
+        """Return the state of the sensor."""
+        return self.coordinator.data["broadband"]["isBroadbandConnected"]
+
+    @property
+    @override
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return super().available and self.coordinator.data["broadband"] is not None

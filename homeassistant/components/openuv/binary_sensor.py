@@ -1,110 +1,83 @@
 """Support for OpenUV binary sensors."""
-import logging
 
-from homeassistant.components.binary_sensor import BinarySensorDevice
-from homeassistant.core import callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.util.dt import as_local, parse_datetime, utcnow
+from typing import override
 
-from . import (
-    BINARY_SENSORS, DATA_OPENUV_CLIENT, DATA_PROTECTION_WINDOW, DOMAIN,
-    TOPIC_UPDATE, TYPE_PROTECTION_WINDOW, OpenUvEntity)
+from homeassistant.components.binary_sensor import (
+    BinarySensorEntity,
+    BinarySensorEntityDescription,
+)
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util.dt import as_local
 
-_LOGGER = logging.getLogger(__name__)
-ATTR_PROTECTION_WINDOW_ENDING_TIME = 'end_time'
-ATTR_PROTECTION_WINDOW_ENDING_UV = 'end_uv'
-ATTR_PROTECTION_WINDOW_STARTING_TIME = 'start_time'
-ATTR_PROTECTION_WINDOW_STARTING_UV = 'start_uv'
+from .const import DATA_PROTECTION_WINDOW, LOGGER, TYPE_PROTECTION_WINDOW
+from .coordinator import OpenUvConfigEntry
+from .entity import OpenUvEntity
+
+ATTR_PROTECTION_WINDOW_ENDING_TIME = "end_time"
+ATTR_PROTECTION_WINDOW_ENDING_UV = "end_uv"
+ATTR_PROTECTION_WINDOW_STARTING_TIME = "start_time"
+ATTR_PROTECTION_WINDOW_STARTING_UV = "start_uv"
+
+BINARY_SENSOR_DESCRIPTION_PROTECTION_WINDOW = BinarySensorEntityDescription(
+    key=TYPE_PROTECTION_WINDOW,
+    translation_key="protection_window",
+)
 
 
-async def async_setup_platform(
-        hass, config, async_add_entities, discovery_info=None):
-    """Set up an OpenUV sensor based on existing config."""
-    pass
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: OpenUvConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up OpenUV binary sensors for a config entry."""
+    coordinators = entry.runtime_data
 
-
-async def async_setup_entry(hass, entry, async_add_entities):
-    """Set up an OpenUV sensor based on a config entry."""
-    openuv = hass.data[DOMAIN][DATA_OPENUV_CLIENT][entry.entry_id]
-
-    binary_sensors = []
-    for sensor_type in openuv.binary_sensor_conditions:
-        name, icon = BINARY_SENSORS[sensor_type]
-        binary_sensors.append(
+    async_add_entities(
+        [
             OpenUvBinarySensor(
-                openuv, sensor_type, name, icon, entry.entry_id))
+                coordinators[DATA_PROTECTION_WINDOW],
+                BINARY_SENSOR_DESCRIPTION_PROTECTION_WINDOW,
+            )
+        ]
+    )
 
-    async_add_entities(binary_sensors, True)
 
-
-class OpenUvBinarySensor(OpenUvEntity, BinarySensorDevice):
+class OpenUvBinarySensor(OpenUvEntity, BinarySensorEntity):
     """Define a binary sensor for OpenUV."""
 
-    def __init__(self, openuv, sensor_type, name, icon, entry_id):
-        """Initialize the sensor."""
-        super().__init__(openuv)
+    @callback
+    @override
+    def _handle_coordinator_update(self) -> None:
+        """Update the entity from the latest data."""
+        self._update_attrs()
+        super()._handle_coordinator_update()
 
-        self._async_unsub_dispatcher_connect = None
-        self._entry_id = entry_id
-        self._icon = icon
-        self._latitude = openuv.client.latitude
-        self._longitude = openuv.client.longitude
-        self._name = name
-        self._sensor_type = sensor_type
-        self._state = None
-
-    @property
-    def icon(self):
-        """Return the icon."""
-        return self._icon
-
-    @property
-    def is_on(self):
-        """Return the status of the sensor."""
-        return self._state
-
-    @property
-    def should_poll(self):
-        """Disable polling."""
-        return False
-
-    @property
-    def unique_id(self) -> str:
-        """Return a unique, HASS-friendly identifier for this entity."""
-        return '{0}_{1}_{2}'.format(
-            self._latitude, self._longitude, self._sensor_type)
-
-    async def async_added_to_hass(self):
-        """Register callbacks."""
-        @callback
-        def update():
-            """Update the state."""
-            self.async_schedule_update_ha_state(True)
-
-        self._async_unsub_dispatcher_connect = async_dispatcher_connect(
-            self.hass, TOPIC_UPDATE, update)
-
-    async def async_will_remove_from_hass(self):
-        """Disconnect dispatcher listener when removed."""
-        if self._async_unsub_dispatcher_connect:
-            self._async_unsub_dispatcher_connect()
-
-    async def async_update(self):
-        """Update the state."""
-        data = self.openuv.data[DATA_PROTECTION_WINDOW]
+    @override
+    def _update_attrs(self) -> None:
+        data = self.coordinator.data
 
         if not data:
+            LOGGER.warning("Skipping update due to missing data")
             return
 
-        if self._sensor_type == TYPE_PROTECTION_WINDOW:
-            self._state = parse_datetime(
-                data['from_time']) <= utcnow() <= parse_datetime(
-                    data['to_time'])
-            self._attrs.update({
-                ATTR_PROTECTION_WINDOW_ENDING_TIME:
-                    as_local(parse_datetime(data['to_time'])),
-                ATTR_PROTECTION_WINDOW_ENDING_UV: data['to_uv'],
-                ATTR_PROTECTION_WINDOW_STARTING_UV: data['from_uv'],
-                ATTR_PROTECTION_WINDOW_STARTING_TIME:
-                    as_local(parse_datetime(data['from_time'])),
-            })
+        if self.entity_description.key == TYPE_PROTECTION_WINDOW:
+            self._attr_is_on = data.get("is_on", False)
+            self._attr_extra_state_attributes.update(
+                {
+                    attr_key: data[data_key]
+                    for attr_key, data_key in (
+                        (ATTR_PROTECTION_WINDOW_STARTING_UV, "from_uv"),
+                        (ATTR_PROTECTION_WINDOW_ENDING_UV, "to_uv"),
+                    )
+                }
+            )
+            self._attr_extra_state_attributes.update(
+                {
+                    attr_key: as_local(data[data_key])
+                    for attr_key, data_key in (
+                        (ATTR_PROTECTION_WINDOW_STARTING_TIME, "from_time"),
+                        (ATTR_PROTECTION_WINDOW_ENDING_TIME, "to_time"),
+                    )
+                }
+            )

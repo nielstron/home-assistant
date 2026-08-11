@@ -1,147 +1,95 @@
 """Support for Plaato Airlock sensors."""
 
-import logging
+from typing import override
 
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.entity import Entity
+from pyplaato.models.device import PlaatoDevice
+from pyplaato.plaato import PlaatoKeg
 
-from . import (
-    ATTR_ABV, ATTR_BATCH_VOLUME, ATTR_BPM, ATTR_CO2_VOLUME, ATTR_TEMP,
-    ATTR_TEMP_UNIT, ATTR_VOLUME_UNIT, DOMAIN as PLAATO_DOMAIN,
-    PLAATO_DEVICE_ATTRS, PLAATO_DEVICE_SENSORS, SENSOR_DATA_KEY, SENSOR_UPDATE)
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import (
+    async_dispatcher_connect,
+    async_dispatcher_send,
+)
+from homeassistant.helpers.entity_platform import (
+    AddConfigEntryEntitiesCallback,
+    AddEntitiesCallback,
+)
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
-_LOGGER = logging.getLogger(__name__)
+from . import ATTR_TEMP, SENSOR_UPDATE
+from .const import CONF_USE_WEBHOOK, SENSOR_SIGNAL
+from .coordinator import PlaatoConfigEntry, PlaatoCoordinator, PlaatoData
+from .entity import PlaatoEntity
 
 
-async def async_setup_platform(hass, config, async_add_entities,
-                               discovery_info=None):
+async def async_setup_platform(
+    hass: HomeAssistant,
+    config: ConfigType,
+    async_add_entities: AddEntitiesCallback,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> None:
     """Set up the Plaato sensor."""
 
 
-async def async_setup_entry(hass, config_entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: PlaatoConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     """Set up Plaato from a config entry."""
-    devices = {}
+    entry_data = entry.runtime_data
 
-    def get_device(device_id):
-        """Get a device."""
-        return hass.data[PLAATO_DOMAIN].get(device_id, False)
-
-    def get_device_sensors(device_id):
-        """Get device sensors."""
-        return hass.data[PLAATO_DOMAIN].get(device_id)\
-            .get(PLAATO_DEVICE_SENSORS)
-
-    async def _update_sensor(device_id):
+    @callback
+    def _async_update_from_webhook(device_id, sensor_data: PlaatoDevice):
         """Update/Create the sensors."""
-        if device_id not in devices and get_device(device_id):
-            entities = []
-            sensors = get_device_sensors(device_id)
+        entry_data.sensor_data = sensor_data
 
-            for sensor_type in sensors:
-                entities.append(PlaatoSensor(device_id, sensor_type))
-
-            devices[device_id] = entities
-
-            async_add_entities(entities, True)
+        if device_id != entry_data.device_id:
+            entry_data.device_id = device_id
+            async_add_entities(
+                [
+                    PlaatoSensor(entry_data, sensor_type)
+                    for sensor_type in sensor_data.sensors
+                ]
+            )
         else:
-            for entity in devices[device_id]:
-                async_dispatcher_send(hass, "{}_{}".format(PLAATO_DOMAIN,
-                                                           entity.unique_id))
+            for sensor_type in sensor_data.sensors:
+                async_dispatcher_send(hass, SENSOR_SIGNAL % (device_id, sensor_type))
 
-    hass.data[SENSOR_DATA_KEY] = async_dispatcher_connect(
-        hass, SENSOR_UPDATE, _update_sensor
-    )
+    if entry.data[CONF_USE_WEBHOOK]:
+        async_dispatcher_connect(hass, SENSOR_UPDATE, _async_update_from_webhook)
+    else:
+        coordinator = entry_data.coordinator
+        assert coordinator is not None
+        async_add_entities(
+            PlaatoSensor(entry_data, sensor_type, coordinator)
+            for sensor_type in coordinator.data.sensors
+        )
 
-    return True
 
+class PlaatoSensor(PlaatoEntity, SensorEntity):
+    """Representation of a Plaato Sensor."""
 
-class PlaatoSensor(Entity):
-    """Representation of a Sensor."""
-
-    def __init__(self, device_id, sensor_type):
-        """Initialize the sensor."""
-        self._device_id = device_id
-        self._type = sensor_type
-        self._state = 0
-        self._name = "{} {}".format(device_id, sensor_type)
-        self._attributes = None
-
-    @property
-    def name(self):
-        """Return the name of the sensor."""
-        return "{} {}".format(PLAATO_DOMAIN, self._name)
-
-    @property
-    def unique_id(self):
-        """Return the unique ID of this sensor."""
-        return "{}_{}".format(self._device_id, self._type)
+    def __init__(
+        self,
+        data: PlaatoData,
+        sensor_type: str,
+        coordinator: PlaatoCoordinator | None = None,
+    ) -> None:
+        """Initialize plaato sensor."""
+        super().__init__(data, sensor_type, coordinator)
+        if sensor_type is PlaatoKeg.Pins.TEMPERATURE or sensor_type == ATTR_TEMP:
+            self._attr_device_class = SensorDeviceClass.TEMPERATURE
 
     @property
-    def device_info(self):
-        """Get device info."""
-        return {
-            'identifiers': {
-                (PLAATO_DOMAIN, self._device_id)
-            },
-            'name': self._device_id,
-            'manufacturer': 'Plaato',
-            'model': 'Airlock'
-        }
-
-    def get_sensors(self):
-        """Get device sensors."""
-        return self.hass.data[PLAATO_DOMAIN].get(self._device_id)\
-            .get(PLAATO_DEVICE_SENSORS, False)
-
-    def get_sensors_unit_of_measurement(self, sensor_type):
-        """Get unit of measurement for sensor of type."""
-        return self.hass.data[PLAATO_DOMAIN].get(self._device_id)\
-            .get(PLAATO_DEVICE_ATTRS, []).get(sensor_type, '')
-
-    @property
-    def state(self):
+    @override
+    def native_value(self) -> str | int | float | None:
         """Return the state of the sensor."""
-        sensors = self.get_sensors()
-        if sensors is False:
-            _LOGGER.debug("Device with name %s has no sensors.", self.name)
-            return 0
-
-        if self._type == ATTR_ABV:
-            return round(sensors.get(self._type), 2)
-        if self._type == ATTR_TEMP:
-            return round(sensors.get(self._type), 1)
-        if self._type == ATTR_CO2_VOLUME:
-            return round(sensors.get(self._type), 2)
-        return sensors.get(self._type)
+        return self._sensor_data.sensors.get(self._sensor_type)
 
     @property
-    def device_state_attributes(self):
-        """Return the state attributes of the monitored installation."""
-        if self._attributes is not None:
-            return self._attributes
-
-    @property
-    def unit_of_measurement(self):
+    @override
+    def native_unit_of_measurement(self) -> str | None:
         """Return the unit of measurement."""
-        if self._type == ATTR_TEMP:
-            return self.get_sensors_unit_of_measurement(ATTR_TEMP_UNIT)
-        if self._type == ATTR_BATCH_VOLUME or self._type == ATTR_CO2_VOLUME:
-            return self.get_sensors_unit_of_measurement(ATTR_VOLUME_UNIT)
-        if self._type == ATTR_BPM:
-            return 'bpm'
-        if self._type == ATTR_ABV:
-            return '%'
-
-        return ''
-
-    @property
-    def should_poll(self):
-        """Return the polling state."""
-        return False
-
-    async def async_added_to_hass(self):
-        """Register callbacks."""
-        self.hass.helpers.dispatcher.async_dispatcher_connect(
-            "{}_{}".format(PLAATO_DOMAIN, self.unique_id),
-            self.async_schedule_update_ha_state)
+        return self._sensor_data.get_unit_of_measurement(self._sensor_type)

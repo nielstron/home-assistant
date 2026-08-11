@@ -1,108 +1,81 @@
 """Support for AquaLogic switches."""
-import logging
 
-import voluptuous as vol
+from typing import Any, override
 
-from homeassistant.components.switch import PLATFORM_SCHEMA, SwitchDevice
-from homeassistant.const import CONF_MONITORED_CONDITIONS
-from homeassistant.core import callback
-import homeassistant.helpers.config_validation as cv
+from aqualogic.core import States
 
-from . import DOMAIN, UPDATE_TOPIC
+from homeassistant.components.switch import SwitchEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-_LOGGER = logging.getLogger(__name__)
+from . import AquaLogicConfigEntry, AquaLogicProcessor
+from .const import UPDATE_TOPIC
 
-SWITCH_TYPES = {
-    'lights': 'Lights',
-    'filter': 'Filter',
-    'filter_low_speed': 'Filter Low Speed',
-    'aux_1': 'Aux 1',
-    'aux_2': 'Aux 2',
-    'aux_3': 'Aux 3',
-    'aux_4': 'Aux 4',
-    'aux_5': 'Aux 5',
-    'aux_6': 'Aux 6',
-    'aux_7': 'Aux 7',
+_SWITCH_MAP: dict[str, tuple[str, States]] = {
+    "lights": ("Lights", States.LIGHTS),
+    "filter": ("Filter", States.FILTER),
+    "filter_low_speed": ("Filter Low Speed", States.FILTER_LOW_SPEED),
+    "aux_1": ("Aux 1", States.AUX_1),
+    "aux_2": ("Aux 2", States.AUX_2),
+    "aux_3": ("Aux 3", States.AUX_3),
+    "aux_4": ("Aux 4", States.AUX_4),
+    "aux_5": ("Aux 5", States.AUX_5),
+    "aux_6": ("Aux 6", States.AUX_6),
+    "aux_7": ("Aux 7", States.AUX_7),
 }
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Optional(CONF_MONITORED_CONDITIONS, default=list(SWITCH_TYPES)):
-        vol.All(cv.ensure_list, [vol.In(SWITCH_TYPES)]),
-})
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AquaLogicConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the switch entities."""
+    processor = entry.runtime_data
+
+    async_add_entities(
+        AquaLogicSwitch(processor, switch_type) for switch_type in _SWITCH_MAP
+    )
 
 
-async def async_setup_platform(
-        hass, config, async_add_entities, discovery_info=None):
-    """Set up the switch platform."""
-    switches = []
-
-    processor = hass.data[DOMAIN]
-    for switch_type in config.get(CONF_MONITORED_CONDITIONS):
-        switches.append(AquaLogicSwitch(processor, switch_type))
-
-    async_add_entities(switches)
-
-
-class AquaLogicSwitch(SwitchDevice):
+class AquaLogicSwitch(SwitchEntity):
     """Switch implementation for the AquaLogic component."""
 
-    def __init__(self, processor, switch_type):
+    _attr_should_poll = False
+
+    def __init__(self, processor: AquaLogicProcessor, switch_type: str) -> None:
         """Initialize switch."""
-        from aqualogic.core import States
+        name, state = _SWITCH_MAP[switch_type]
         self._processor = processor
-        self._type = switch_type
-        self._state_name = {
-            'lights': States.LIGHTS,
-            'filter': States.FILTER,
-            'filter_low_speed': States.FILTER_LOW_SPEED,
-            'aux_1': States.AUX_1,
-            'aux_2': States.AUX_2,
-            'aux_3': States.AUX_3,
-            'aux_4': States.AUX_4,
-            'aux_5': States.AUX_5,
-            'aux_6': States.AUX_6,
-            'aux_7': States.AUX_7
-        }[switch_type]
+        self._state_name = state
+        self._attr_name = f"AquaLogic {name}"
 
     @property
-    def name(self):
-        """Return the name of the switch."""
-        return "AquaLogic {}".format(SWITCH_TYPES[self._type])
-
-    @property
-    def should_poll(self):
-        """Return the polling state."""
-        return False
-
-    @property
-    def is_on(self):
+    @override
+    def is_on(self) -> bool:
         """Return true if device is on."""
-        panel = self._processor.panel
-        if panel is None:
+        if (panel := self._processor.panel) is None:
             return False
-        state = panel.get_state(self._state_name)
-        return state
+        return panel.get_state(self._state_name)  # type: ignore[no-any-return]
 
-    def turn_on(self, **kwargs):
+    @override
+    def turn_on(self, **kwargs: Any) -> None:
         """Turn the device on."""
-        panel = self._processor.panel
-        if panel is None:
+        if (panel := self._processor.panel) is None:
             return
         panel.set_state(self._state_name, True)
 
-    def turn_off(self, **kwargs):
+    @override
+    def turn_off(self, **kwargs: Any) -> None:
         """Turn the device off."""
-        panel = self._processor.panel
-        if panel is None:
+        if (panel := self._processor.panel) is None:
             return
         panel.set_state(self._state_name, False)
 
-    async def async_added_to_hass(self):
+    @override
+    async def async_added_to_hass(self) -> None:
         """Register callbacks."""
-        self.hass.helpers.dispatcher.async_dispatcher_connect(
-            UPDATE_TOPIC, self.async_update_callback)
-
-    @callback
-    def async_update_callback(self):
-        """Update callback."""
-        self.async_schedule_update_ha_state()
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, UPDATE_TOPIC, self.async_write_ha_state)
+        )

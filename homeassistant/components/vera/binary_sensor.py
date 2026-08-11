@@ -1,35 +1,48 @@
 """Support for Vera binary sensors."""
-import logging
 
-from homeassistant.components.binary_sensor import (
-    ENTITY_ID_FORMAT, BinarySensorDevice)
+from typing import override
 
-from . import VERA_CONTROLLER, VERA_DEVICES, VeraDevice
+import pyvera as veraApi
 
-_LOGGER = logging.getLogger(__name__)
+from homeassistant.components.binary_sensor import ENTITY_ID_FORMAT, BinarySensorEntity
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Perform the setup for Vera controller devices."""
-    add_entities(
-        [VeraBinarySensor(device, hass.data[VERA_CONTROLLER])
-         for device in hass.data[VERA_DEVICES]['binary_sensor']], True)
+from .common import ControllerData, VeraConfigEntry
+from .entity import VeraEntity
 
 
-class VeraBinarySensor(VeraDevice, BinarySensorDevice):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: VeraConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the sensor config entry."""
+    controller_data = entry.runtime_data
+    async_add_entities(
+        [
+            VeraBinarySensor(device, controller_data)
+            for device in controller_data.devices[Platform.BINARY_SENSOR]
+        ],
+        True,
+    )
+
+
+class VeraBinarySensor(VeraEntity[veraApi.VeraBinarySensor], BinarySensorEntity):
     """Representation of a Vera Binary Sensor."""
 
-    def __init__(self, vera_device, controller):
+    _attr_is_on = False
+
+    def __init__(
+        self, vera_device: veraApi.VeraBinarySensor, controller_data: ControllerData
+    ) -> None:
         """Initialize the binary_sensor."""
-        self._state = False
-        VeraDevice.__init__(self, vera_device, controller)
+        VeraEntity.__init__(self, vera_device, controller_data)
         self.entity_id = ENTITY_ID_FORMAT.format(self.vera_id)
 
-    @property
-    def is_on(self):
-        """Return true if sensor is on."""
-        return self._state
-
-    def update(self):
+    @override
+    def update(self) -> None:
         """Get the latest data and update the state."""
-        self._state = self.vera_device.is_tripped
+        super().update()
+        self._attr_is_on = self.vera_device.is_tripped

@@ -1,131 +1,139 @@
 """Support for scanning a network with nmap."""
+
 import logging
-from collections import namedtuple
-from datetime import timedelta
+from typing import Any, override
 
-from getmac import get_mac_address
-import voluptuous as vol
+from homeassistant.components.device_tracker import ScannerEntity
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-import homeassistant.helpers.config_validation as cv
-import homeassistant.util.dt as dt_util
-from homeassistant.components.device_tracker import (
-    DOMAIN, PLATFORM_SCHEMA, DeviceScanner)
-from homeassistant.const import CONF_HOSTS
+from . import (
+    NmapDevice,
+    NmapDeviceScanner,
+    NmapTrackerConfigEntry,
+    short_hostname,
+    signal_device_update,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-CONF_EXCLUDE = 'exclude'
-# Interval in minutes to exclude devices from a scan while they are home
-CONF_HOME_INTERVAL = 'home_interval'
-CONF_OPTIONS = 'scan_options'
-DEFAULT_OPTIONS = '-F --host-timeout 5s'
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: NmapTrackerConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up device tracker for Nmap Tracker component."""
+    nmap_tracker = entry.runtime_data
+
+    @callback
+    def device_new(mac_address):
+        """Signal a new device."""
+        async_add_entities([NmapTrackerEntity(nmap_tracker, mac_address, True)])
+
+    @callback
+    def device_missing(mac_address):
+        """Signal a missing device."""
+        async_add_entities([NmapTrackerEntity(nmap_tracker, mac_address, False)])
+
+    entry.async_on_unload(
+        async_dispatcher_connect(hass, nmap_tracker.signal_device_new, device_new)
+    )
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass, nmap_tracker.signal_device_missing, device_missing
+        )
+    )
 
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_HOSTS): cv.ensure_list,
-    vol.Required(CONF_HOME_INTERVAL, default=0): cv.positive_int,
-    vol.Optional(CONF_EXCLUDE, default=[]):
-        vol.All(cv.ensure_list, [cv.string]),
-    vol.Optional(CONF_OPTIONS, default=DEFAULT_OPTIONS):
-        cv.string
-})
+class NmapTrackerEntity(ScannerEntity):
+    """An Nmap Tracker entity."""
 
+    _attr_should_poll = False
+    _attr_translation_key = "device_tracker"
 
-def get_scanner(hass, config):
-    """Validate the configuration and return a Nmap scanner."""
-    return NmapDeviceScanner(config[DOMAIN])
+    def __init__(
+        self, nmap_tracker: NmapDeviceScanner, mac_address: str, active: bool
+    ) -> None:
+        """Initialize an nmap tracker entity."""
+        self._mac_address = mac_address
+        self._nmap_tracker = nmap_tracker
+        self._tracked = self._nmap_tracker.devices.tracked
+        self._active = active
 
+    @property
+    def _device(self) -> NmapDevice:
+        """Get latest device state."""
+        return self._tracked[self._mac_address]
 
-Device = namedtuple('Device', ['mac', 'name', 'ip', 'last_update'])
+    @property
+    @override
+    def is_connected(self) -> bool:
+        """Return device status."""
+        return self._active
 
+    @property
+    @override
+    def name(self) -> str:
+        """Return device name."""
+        return self._device.name
 
-class NmapDeviceScanner(DeviceScanner):
-    """This class scans for devices using nmap."""
+    @property
+    @override
+    def unique_id(self) -> str:
+        """Return device unique id."""
+        return self._mac_address
 
-    exclude = []
+    @property
+    @override
+    def ip_address(self) -> str:
+        """Return the primary ip address of the device."""
+        return self._device.ipv4
 
-    def __init__(self, config):
-        """Initialize the scanner."""
-        self.last_results = []
+    @property
+    @override
+    def mac_address(self) -> str:
+        """Return the mac address of the device."""
+        return self._mac_address
 
-        self.hosts = config[CONF_HOSTS]
-        self.exclude = config[CONF_EXCLUDE]
-        minutes = config[CONF_HOME_INTERVAL]
-        self._options = config[CONF_OPTIONS]
-        self.home_interval = timedelta(minutes=minutes)
+    @property
+    @override
+    def hostname(self) -> str | None:
+        """Return hostname of the device."""
+        if not self._device.hostname:
+            return None
+        return short_hostname(self._device.hostname)
 
-        _LOGGER.debug("Scanner initialized")
+    @callback
+    def async_process_update(self, online: bool) -> None:
+        """Update device."""
+        self._active = online
 
-    def scan_devices(self):
-        """Scan for new devices and return a list with found device IDs."""
-        self._update_info()
+    @property
+    @override
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the attributes."""
+        return {
+            "last_time_reachable": self._device.last_update.isoformat(
+                timespec="seconds"
+            ),
+            "reason": self._device.reason,
+        }
 
-        _LOGGER.debug("Nmap last results %s", self.last_results)
+    @callback
+    def async_on_demand_update(self, online: bool) -> None:
+        """Update state."""
+        self.async_process_update(online)
+        self.async_write_ha_state()
 
-        return [device.mac for device in self.last_results]
-
-    def get_device_name(self, device):
-        """Return the name of the given device or None if we don't know."""
-        filter_named = [result.name for result in self.last_results
-                        if result.mac == device]
-
-        if filter_named:
-            return filter_named[0]
-        return None
-
-    def get_extra_attributes(self, device):
-        """Return the IP of the given device."""
-        filter_ip = next((
-            result.ip for result in self.last_results
-            if result.mac == device), None)
-        return {'ip': filter_ip}
-
-    def _update_info(self):
-        """Scan the network for devices.
-
-        Returns boolean if scanning successful.
-        """
-        _LOGGER.debug("Scanning...")
-
-        from nmap import PortScanner, PortScannerError
-        scanner = PortScanner()
-
-        options = self._options
-
-        if self.home_interval:
-            boundary = dt_util.now() - self.home_interval
-            last_results = [device for device in self.last_results
-                            if device.last_update > boundary]
-            if last_results:
-                exclude_hosts = self.exclude + [device.ip for device
-                                                in last_results]
-            else:
-                exclude_hosts = self.exclude
-        else:
-            last_results = []
-            exclude_hosts = self.exclude
-        if exclude_hosts:
-            options += ' --exclude {}'.format(','.join(exclude_hosts))
-
-        try:
-            result = scanner.scan(hosts=' '.join(self.hosts),
-                                  arguments=options)
-        except PortScannerError:
-            return False
-
-        now = dt_util.now()
-        for ipv4, info in result['scan'].items():
-            if info['status']['state'] != 'up':
-                continue
-            name = info['hostnames'][0]['name'] if info['hostnames'] else ipv4
-            # Mac address only returned if nmap ran as root
-            mac = info['addresses'].get('mac') or get_mac_address(ip=ipv4)
-            if mac is None:
-                _LOGGER.info('No MAC address found for %s', ipv4)
-                continue
-            last_results.append(Device(mac.upper(), name, ipv4, now))
-
-        self.last_results = last_results
-
-        _LOGGER.debug("nmap scan successful")
-        return True
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Register state update callback."""
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                signal_device_update(self._mac_address),
+                self.async_on_demand_update,
+            )
+        )

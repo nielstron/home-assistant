@@ -1,25 +1,12 @@
 """The test for the Melissa Climate component."""
-from tests.common import MockDependency, mock_coro_func
 
-from homeassistant.components import melissa
+from homeassistant.core import HomeAssistant
 
-VALID_CONFIG = {
-    "melissa": {
-        "username": "********",
-        "password": "********",
-    }
-}
+from . import setup_integration
 
 
-async def test_setup(hass):
+async def test_setup(hass: HomeAssistant, mock_melissa) -> None:
     """Test setting up the Melissa component."""
-    with MockDependency('melissa') as mocked_melissa:
-        mocked_melissa.AsyncMelissa().async_connect = mock_coro_func()
-        await melissa.async_setup(hass, VALID_CONFIG)
+    await setup_integration(hass)
 
-        mocked_melissa.AsyncMelissa.assert_called_with(
-            username="********", password="********")
-
-        assert melissa.DATA_MELISSA in hass.data
-        assert isinstance(hass.data[melissa.DATA_MELISSA], type(
-                mocked_melissa.AsyncMelissa()))
+    mock_melissa.assert_called_with(username="********", password="********")

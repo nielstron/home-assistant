@@ -1,180 +1,116 @@
 """Support for Verisure devices."""
-import logging
-import threading
-from datetime import timedelta
 
-import voluptuous as vol
+from contextlib import suppress
+import os
+from pathlib import Path
 
-from homeassistant.const import (CONF_PASSWORD, CONF_SCAN_INTERVAL,
-                                 CONF_USERNAME, EVENT_HOMEASSISTANT_STOP)
-from homeassistant.helpers import discovery
-from homeassistant.util import Throttle
-import homeassistant.helpers.config_validation as cv
+from homeassistant.components.lock import CONF_DEFAULT_CODE, DOMAIN as LOCK_DOMAIN
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_EMAIL, Platform
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers.storage import STORAGE_DIR
 
-_LOGGER = logging.getLogger(__name__)
+from .const import CONF_GIID, CONF_LOCK_DEFAULT_CODE, DOMAIN, LOGGER
+from .coordinator import VerisureConfigEntry, VerisureDataUpdateCoordinator
 
-ATTR_DEVICE_SERIAL = 'device_serial'
-
-CONF_ALARM = 'alarm'
-CONF_CODE_DIGITS = 'code_digits'
-CONF_DOOR_WINDOW = 'door_window'
-CONF_GIID = 'giid'
-CONF_HYDROMETERS = 'hygrometers'
-CONF_LOCKS = 'locks'
-CONF_DEFAULT_LOCK_CODE = 'default_lock_code'
-CONF_MOUSE = 'mouse'
-CONF_SMARTPLUGS = 'smartplugs'
-CONF_THERMOMETERS = 'thermometers'
-CONF_SMARTCAM = 'smartcam'
-
-DOMAIN = 'verisure'
-
-MIN_SCAN_INTERVAL = timedelta(minutes=1)
-DEFAULT_SCAN_INTERVAL = timedelta(minutes=1)
-
-SERVICE_CAPTURE_SMARTCAM = 'capture_smartcam'
-
-HUB = None
-
-CONFIG_SCHEMA = vol.Schema({
-    DOMAIN: vol.Schema({
-        vol.Required(CONF_PASSWORD): cv.string,
-        vol.Required(CONF_USERNAME): cv.string,
-        vol.Optional(CONF_ALARM, default=True): cv.boolean,
-        vol.Optional(CONF_CODE_DIGITS, default=4): cv.positive_int,
-        vol.Optional(CONF_DOOR_WINDOW, default=True): cv.boolean,
-        vol.Optional(CONF_GIID): cv.string,
-        vol.Optional(CONF_HYDROMETERS, default=True): cv.boolean,
-        vol.Optional(CONF_LOCKS, default=True): cv.boolean,
-        vol.Optional(CONF_DEFAULT_LOCK_CODE): cv.string,
-        vol.Optional(CONF_MOUSE, default=True): cv.boolean,
-        vol.Optional(CONF_SMARTPLUGS, default=True): cv.boolean,
-        vol.Optional(CONF_THERMOMETERS, default=True): cv.boolean,
-        vol.Optional(CONF_SMARTCAM, default=True): cv.boolean,
-        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): (
-            vol.All(cv.time_period, vol.Clamp(min=MIN_SCAN_INTERVAL))),
-    }),
-}, extra=vol.ALLOW_EXTRA)
-
-CAPTURE_IMAGE_SCHEMA = vol.Schema({
-    vol.Required(ATTR_DEVICE_SERIAL): cv.string
-})
+PLATFORMS = [
+    Platform.ALARM_CONTROL_PANEL,
+    Platform.BINARY_SENSOR,
+    Platform.CAMERA,
+    Platform.LOCK,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
 
 
-def setup(hass, config):
-    """Set up the Verisure component."""
-    import verisure
-    global HUB
-    HUB = VerisureHub(config[DOMAIN], verisure)
-    HUB.update_overview = Throttle(
-        config[DOMAIN][CONF_SCAN_INTERVAL])(HUB.update_overview)
-    if not HUB.login():
-        return False
-    hass.bus.listen_once(EVENT_HOMEASSISTANT_STOP,
-                         lambda event: HUB.logout())
-    HUB.update_overview()
+async def async_setup_entry(hass: HomeAssistant, entry: VerisureConfigEntry) -> bool:
+    """Set up Verisure from a config entry."""
+    await hass.async_add_executor_job(migrate_cookie_files, hass, entry)
 
-    for component in ('sensor', 'switch', 'alarm_control_panel', 'lock',
-                      'camera', 'binary_sensor'):
-        discovery.load_platform(hass, component, DOMAIN, {}, config)
+    coordinator = VerisureDataUpdateCoordinator(hass, entry=entry)
 
-    def capture_smartcam(service):
-        """Capture a new picture from a smartcam."""
-        device_id = service.data.get(ATTR_DEVICE_SERIAL)
-        HUB.smartcam_capture(device_id)
-        _LOGGER.debug("Capturing new image from %s", ATTR_DEVICE_SERIAL)
+    if not await coordinator.async_login():
+        raise ConfigEntryNotReady("Could not log in to verisure.")
 
-    hass.services.register(DOMAIN, SERVICE_CAPTURE_SMARTCAM,
-                           capture_smartcam,
-                           schema=CAPTURE_IMAGE_SCHEMA)
+    await coordinator.async_config_entry_first_refresh()
+
+    entry.runtime_data = coordinator
+
+    # Register the alarm (VBox) device so children can link to it via via_device_id
+    # regardless of platform setup order.
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.data[CONF_GIID])},
+        manufacturer="Verisure",
+        model="VBox",
+        name="Verisure Alarm",
+        configuration_url="https://mypages.verisure.com",
+    )
+
+    # Set up all platforms for this device/entry.
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Update options
+    entry.async_on_unload(entry.add_update_listener(update_listener))
 
     return True
 
 
-class VerisureHub:
-    """A Verisure hub wrapper class."""
+async def update_listener(hass: HomeAssistant, entry: VerisureConfigEntry) -> None:
+    """Handle options update."""
+    # Propagate configuration change.
+    entry.runtime_data.async_update_listeners()
 
-    def __init__(self, domain_config, verisure):
-        """Initialize the Verisure hub."""
-        self.overview = {}
-        self.imageseries = {}
 
-        self.config = domain_config
-        self._verisure = verisure
+async def async_unload_entry(hass: HomeAssistant, entry: VerisureConfigEntry) -> bool:
+    """Unload Verisure config entry."""
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if not unload_ok:
+        return False
 
-        self._lock = threading.Lock()
+    return True
 
-        self.session = verisure.Session(
-            domain_config[CONF_USERNAME],
-            domain_config[CONF_PASSWORD])
 
-        self.giid = domain_config.get(CONF_GIID)
+async def async_remove_entry(hass: HomeAssistant, entry: VerisureConfigEntry) -> None:
+    """Erase session cookie when the config entry is deleted."""
+    cookie_file = hass.config.path(STORAGE_DIR, f"verisure_{entry.data[CONF_EMAIL]}")
+    with suppress(FileNotFoundError):
+        await hass.async_add_executor_job(os.unlink, cookie_file)
 
-        import jsonpath
-        self.jsonpath = jsonpath.jsonpath
 
-    def login(self):
-        """Login to Verisure."""
-        try:
-            self.session.login()
-        except self._verisure.Error as ex:
-            _LOGGER.error('Could not log in to verisure, %s', ex)
-            return False
-        if self.giid:
-            return self.set_giid()
-        return True
+def migrate_cookie_files(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Migrate old cookie file to new location."""
+    cookie_file = Path(hass.config.path(STORAGE_DIR, f"verisure_{entry.unique_id}"))
+    if cookie_file.exists():
+        cookie_file.rename(
+            hass.config.path(STORAGE_DIR, f"verisure_{entry.data[CONF_EMAIL]}")
+        )
 
-    def logout(self):
-        """Logout from Verisure."""
-        try:
-            self.session.logout()
-        except self._verisure.Error as ex:
-            _LOGGER.error('Could not log out from verisure, %s', ex)
-            return False
-        return True
 
-    def set_giid(self):
-        """Set installation GIID."""
-        try:
-            self.session.set_giid(self.giid)
-        except self._verisure.Error as ex:
-            _LOGGER.error('Could not set installation GIID, %s', ex)
-            return False
-        return True
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate old entry."""
+    LOGGER.debug("Migrating from version %s", entry.version)
 
-    def update_overview(self):
-        """Update the overview."""
-        try:
-            self.overview = self.session.get_overview()
-        except self._verisure.ResponseError as ex:
-            _LOGGER.error('Could not read overview, %s', ex)
-            if ex.status_code == 503:  # Service unavailable
-                _LOGGER.info('Trying to log in again')
-                self.login()
-            else:
-                raise
+    if entry.version == 1:
+        if config_entry_default_code := entry.options.get(CONF_LOCK_DEFAULT_CODE):
+            entity_reg = er.async_get(hass)
+            entries = er.async_entries_for_config_entry(entity_reg, entry.entry_id)
+            for entity in entries:
+                if entity.entity_id.startswith("lock"):
+                    entity_reg.async_update_entity_options(
+                        entity.entity_id,
+                        LOCK_DOMAIN,
+                        {CONF_DEFAULT_CODE: config_entry_default_code},
+                    )
+            new_options = entry.options.copy()
+            del new_options[CONF_LOCK_DEFAULT_CODE]
 
-    @Throttle(timedelta(seconds=60))
-    def update_smartcam_imageseries(self):
-        """Update the image series."""
-        self.imageseries = self.session.get_camera_imageseries()
+            hass.config_entries.async_update_entry(entry, options=new_options)
 
-    @Throttle(timedelta(seconds=30))
-    def smartcam_capture(self, device_id):
-        """Capture a new image from a smartcam."""
-        self.session.capture_image(device_id)
+        hass.config_entries.async_update_entry(entry, version=2)
 
-    def get(self, jpath, *args):
-        """Get values from the overview that matches the jsonpath."""
-        res = self.jsonpath(self.overview, jpath % args)
-        return res if res else []
+    LOGGER.debug("Migration to version %s successful", entry.version)
 
-    def get_first(self, jpath, *args):
-        """Get first value from the overview that matches the jsonpath."""
-        res = self.get(jpath, *args)
-        return res[0] if res else None
-
-    def get_image_info(self, jpath, *args):
-        """Get values from the imageseries that matches the jsonpath."""
-        res = self.jsonpath(self.imageseries, jpath % args)
-        return res if res else []
+    return True

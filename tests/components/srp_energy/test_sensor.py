@@ -1,62 +1,96 @@
-"""The tests for the Srp Energy Platform."""
+"""Tests for the srp_energy sensor platform."""
+
 from unittest.mock import patch
-import logging
-from homeassistant.setup import async_setup_component
 
-_LOGGER = logging.getLogger(__name__)
+from requests.models import HTTPError
 
-VALID_CONFIG_MINIMAL = {
-    'sensor': {
-        'platform': 'srp_energy',
-        'username': 'foo',
-        'password': 'bar',
-        'id': 1234
-    }
-}
+from homeassistant.components.recorder import Recorder
+from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.const import (
+    ATTR_ATTRIBUTION,
+    ATTR_DEVICE_CLASS,
+    ATTR_UNIT_OF_MEASUREMENT,
+    UnitOfEnergy,
+)
+from homeassistant.core import HomeAssistant
 
-PATCH_INIT = 'srpenergy.client.SrpEnergyClient.__init__'
-PATCH_VALIDATE = 'srpenergy.client.SrpEnergyClient.validate'
-PATCH_USAGE = 'srpenergy.client.SrpEnergyClient.usage'
+from tests.common import MockConfigEntry
 
 
-def mock_usage(self, startdate, enddate):  # pylint: disable=invalid-name
-    """Mock srpusage usage."""
-    _LOGGER.log(logging.INFO, "Calling mock usage")
-    usage = [
-        ('9/19/2018', '12:00 AM', '2018-09-19T00:00:00-7:00', '1.2', '0.17'),
-        ('9/19/2018', '1:00 AM', '2018-09-19T01:00:00-7:00', '2.1', '0.30'),
-        ('9/19/2018', '2:00 AM', '2018-09-19T02:00:00-7:00', '1.5', '0.23'),
-        ('9/19/2018', '9:00 PM', '2018-09-19T21:00:00-7:00', '1.2', '0.19'),
-        ('9/19/2018', '10:00 PM', '2018-09-19T22:00:00-7:00', '1.1', '0.18'),
-        ('9/19/2018', '11:00 PM', '2018-09-19T23:00:00-7:00', '0.4', '0.09')
-        ]
-    return usage
+async def test_loading_sensors(
+    recorder_mock: Recorder, hass: HomeAssistant, init_integration
+) -> None:
+    """Test the srp energy sensors."""
+    # Validate the Config Entry was initialized
+    assert init_integration.state is ConfigEntryState.LOADED
+
+    # Check sensors were loaded
+    assert len(hass.states.async_all()) == 1
 
 
-async def test_setup_with_config(hass):
-    """Test the platform setup with configuration."""
-    with patch(PATCH_INIT, return_value=None), \
-        patch(PATCH_VALIDATE, return_value=True), \
-            patch(PATCH_USAGE, new=mock_usage):
+async def test_srp_entity(
+    recorder_mock: Recorder, hass: HomeAssistant, init_integration
+) -> None:
+    """Test the SrpEntity."""
+    usage_state = hass.states.get("sensor.srp_energy_mock_title_energy_usage")
+    assert usage_state.state == "67.4"
 
-        await async_setup_component(hass, 'sensor', VALID_CONFIG_MINIMAL)
+    # Validate attributions
+    assert (
+        usage_state.attributes.get("state_class") is SensorStateClass.TOTAL_INCREASING
+    )
+    assert usage_state.attributes.get(ATTR_ATTRIBUTION) == "Powered by SRP Energy"
+    assert (
+        usage_state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
+        == UnitOfEnergy.KILO_WATT_HOUR
+    )
 
-        state = hass.states.get('sensor.srp_energy')
-        assert state is not None
+    assert usage_state.attributes.get(ATTR_DEVICE_CLASS) == SensorDeviceClass.ENERGY
 
 
-async def test_daily_usage(hass):
-    """Test the platform daily usage."""
-    with patch(PATCH_INIT, return_value=None), \
-        patch(PATCH_VALIDATE, return_value=True), \
-            patch(PATCH_USAGE, new=mock_usage):
+async def test_srp_entity_update_failed(
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Test the SrpEntity."""
 
-        await async_setup_component(hass, 'sensor', VALID_CONFIG_MINIMAL)
+    with patch(
+        "homeassistant.components.srp_energy.SrpEnergyClient", autospec=True
+    ) as srp_energy_mock:
+        client = srp_energy_mock.return_value
+        client.validate.return_value = True
+        client.usage.side_effect = HTTPError
+        mock_config_entry.add_to_hass(hass)
 
-        state = hass.states.get('sensor.srp_energy')
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
 
-        assert state
-        assert state.state == '7.50'
+    usage_state = hass.states.get("sensor.srp_energy_mock_title_energy_usage")
+    assert usage_state is None
 
-        assert state.attributes
-        assert state.attributes.get('unit_of_measurement')
+
+async def test_srp_entity_timeout(
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Test the SrpEntity timing out."""
+
+    with (
+        patch(
+            "homeassistant.components.srp_energy.SrpEnergyClient", autospec=True
+        ) as srp_energy_mock,
+        patch("homeassistant.components.srp_energy.coordinator.TIMEOUT", 0),
+    ):
+        client = srp_energy_mock.return_value
+        client.validate.return_value = True
+        client.usage = lambda _, __, ___: None
+        mock_config_entry.add_to_hass(hass)
+
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    usage_state = hass.states.get("sensor.srp_energy_mock_title_energy_usage")
+    assert usage_state is None

@@ -1,45 +1,49 @@
 """The tests for the litejet component."""
-import logging
-import unittest
 
-from homeassistant.components import litejet
-from tests.common import get_test_home_assistant
+import pytest
 
-_LOGGER = logging.getLogger(__name__)
+from homeassistant.components.litejet.const import DOMAIN
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+from homeassistant.setup import async_setup_component
+
+from . import async_init_integration
 
 
-class TestLiteJet(unittest.TestCase):
-    """Test the litejet component."""
+async def test_setup_with_no_config(hass: HomeAssistant) -> None:
+    """Test that nothing happens."""
+    assert await async_setup_component(hass, DOMAIN, {}) is True
+    assert DOMAIN not in hass.data
 
-    def setup_method(self, method):
-        """Set up things to be run when tests are started."""
-        self.hass = get_test_home_assistant()
-        self.hass.start()
-        self.hass.block_till_done()
 
-    def teardown_method(self, method):
-        """Stop everything that was started."""
-        self.hass.stop()
+@pytest.mark.usefixtures("mock_litejet")
+async def test_child_devices_link_to_mcp(
+    hass: HomeAssistant, device_registry: dr.DeviceRegistry
+) -> None:
+    """Test that light and switch devices are linked to the MCP parent device."""
+    entry = await async_init_integration(hass, use_switch=True)
 
-    def test_is_ignored_unspecified(self):
-        """Ensure it is ignored when unspecified."""
-        self.hass.data['litejet_config'] = {}
-        assert not litejet.is_ignored(self.hass, 'Test')
+    parent = device_registry.async_get_device_by_identifier(
+        (DOMAIN, f"{entry.entry_id}_mcp"), entry.entry_id
+    )
+    assert parent is not None
 
-    def test_is_ignored_empty(self):
-        """Ensure it is ignored when empty."""
-        self.hass.data['litejet_config'] = {
-            litejet.CONF_EXCLUDE_NAMES: []
-        }
-        assert not litejet.is_ignored(self.hass, 'Test')
+    light_device = device_registry.async_get_device_by_identifier(
+        (DOMAIN, f"{entry.entry_id}_light_1"), entry.entry_id
+    )
+    assert light_device is not None
+    assert light_device.via_device_id == parent.id
 
-    def test_is_ignored_normal(self):
-        """Test if usually ignored."""
-        self.hass.data['litejet_config'] = {
-            litejet.CONF_EXCLUDE_NAMES: ['Test', 'Other One']
-        }
-        assert litejet.is_ignored(self.hass, 'Test')
-        assert not litejet.is_ignored(self.hass, 'Other one')
-        assert not litejet.is_ignored(self.hass, 'Other 0ne')
-        assert litejet.is_ignored(self.hass, 'Other One There')
-        assert litejet.is_ignored(self.hass, 'Other One')
+    switch_device = device_registry.async_get_device_by_identifier(
+        (DOMAIN, f"{entry.entry_id}_keypad_101"), entry.entry_id
+    )
+    assert switch_device is not None
+    assert switch_device.via_device_id == parent.id
+
+
+async def test_unload_entry(hass: HomeAssistant, mock_litejet) -> None:
+    """Test being able to unload an entry."""
+    entry = await async_init_integration(hass, use_switch=True, use_scene=True)
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    assert DOMAIN not in hass.data

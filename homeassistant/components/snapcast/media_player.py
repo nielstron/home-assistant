@@ -1,253 +1,437 @@
 """Support for interacting with Snapcast clients."""
-import logging
-import socket
 
-import voluptuous as vol
+from collections.abc import Mapping
+import logging
+from typing import Any, override
+
+from snapcast.control.client import Snapclient
+from snapcast.control.group import Snapgroup
 
 from homeassistant.components.media_player import (
-    MediaPlayerDevice, PLATFORM_SCHEMA)
-from homeassistant.components.media_player.const import (
-    DOMAIN, SUPPORT_SELECT_SOURCE, SUPPORT_VOLUME_MUTE,
-    SUPPORT_VOLUME_SET)
-from homeassistant.const import (
-    ATTR_ENTITY_ID, CONF_HOST, CONF_PORT, STATE_IDLE, STATE_OFF, STATE_ON,
-    STATE_PLAYING, STATE_UNKNOWN)
-import homeassistant.helpers.config_validation as cv
+    DOMAIN as MEDIA_PLAYER_DOMAIN,
+    MediaPlayerDeviceClass,
+    MediaPlayerEntity,
+    MediaPlayerEntityFeature,
+    MediaPlayerState,
+    MediaType,
+)
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+
+from .const import CLIENT_PREFIX, CLIENT_SUFFIX, DOMAIN
+from .coordinator import SnapcastConfigEntry, SnapcastUpdateCoordinator
+from .entity import SnapcastCoordinatorEntity
+
+STREAM_STATUS = {
+    "idle": MediaPlayerState.IDLE,
+    "playing": MediaPlayerState.PLAYING,
+    "unknown": None,
+}
 
 _LOGGER = logging.getLogger(__name__)
 
-DATA_KEY = 'snapcast'
 
-SERVICE_SNAPSHOT = 'snapcast_snapshot'
-SERVICE_RESTORE = 'snapcast_restore'
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: SnapcastConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the snapcast config entry."""
 
-SUPPORT_SNAPCAST_CLIENT = SUPPORT_VOLUME_MUTE | SUPPORT_VOLUME_SET
-SUPPORT_SNAPCAST_GROUP = SUPPORT_VOLUME_MUTE | SUPPORT_VOLUME_SET |\
-    SUPPORT_SELECT_SOURCE
+    coordinator = config_entry.runtime_data
 
-GROUP_PREFIX = 'snapcast_group_'
-GROUP_SUFFIX = 'Snapcast Group'
-CLIENT_PREFIX = 'snapcast_client_'
-CLIENT_SUFFIX = 'Snapcast Client'
+    _known_client_ids: set[str] = set()
 
-SERVICE_SCHEMA = vol.Schema({
-    ATTR_ENTITY_ID: cv.entity_ids,
-})
+    @callback
+    def _update_clients() -> None:
+        # Get IDs of current clients on server
+        snapcast_ids = {d.identifier for d in coordinator.server.clients}
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_HOST): cv.string,
-    vol.Optional(CONF_PORT): cv.port,
-})
+        # Update known IDs
+        ids_to_add = snapcast_ids - _known_client_ids
+        ids_to_remove = _known_client_ids - snapcast_ids
 
+        _known_client_ids.difference_update(ids_to_remove)
+        _known_client_ids.update(ids_to_add)
 
-async def async_setup_platform(hass, config, async_add_entities,
-                               discovery_info=None):
-    """Set up the Snapcast platform."""
-    import snapcast.control
-    from snapcast.control.server import CONTROL_PORT
-    host = config.get(CONF_HOST)
-    port = config.get(CONF_PORT, CONTROL_PORT)
+        # Exit early if no changes
+        if not (ids_to_add | ids_to_remove):
+            return
 
-    async def _handle_service(service):
-        """Handle services."""
-        entity_ids = service.data.get(ATTR_ENTITY_ID)
-        devices = [device for device in hass.data[DATA_KEY]
-                   if device.entity_id in entity_ids]
-        for device in devices:
-            if service.service == SERVICE_SNAPSHOT:
-                device.snapshot()
-            elif service.service == SERVICE_RESTORE:
-                await device.async_restore()
+        _LOGGER.debug(
+            "New snapcast client: %s",
+            str([coordinator.server.client(d).friendly_name for d in ids_to_add]),
+        )
+        _LOGGER.debug(
+            "Remove snapcast client IDs: %s",
+            str([list(ids_to_remove)]),
+        )
 
-    hass.services.async_register(
-        DOMAIN, SERVICE_SNAPSHOT, _handle_service, schema=SERVICE_SCHEMA)
-    hass.services.async_register(
-        DOMAIN, SERVICE_RESTORE, _handle_service, schema=SERVICE_SCHEMA)
+        # Add new entities
+        async_add_entities(
+            [
+                SnapcastClientDevice(
+                    coordinator, coordinator.server.client(snapcast_id)
+                )
+                for snapcast_id in ids_to_add
+            ]
+        )
 
-    try:
-        server = await snapcast.control.create_server(
-            hass.loop, host, port, reconnect=True)
-    except socket.gaierror:
-        _LOGGER.error("Could not connect to Snapcast server at %s:%d",
-                      host, port)
-        return
+        # Remove stale entities
+        entity_registry = er.async_get(hass)
+        for snapcast_id in ids_to_remove:
+            if entity_id := entity_registry.async_get_entity_id(
+                MEDIA_PLAYER_DOMAIN,
+                DOMAIN,
+                SnapcastClientDevice.get_unique_id(coordinator.host_id, snapcast_id),
+            ):
+                entity_registry.async_remove(entity_id)
 
-    # Note: Host part is needed, when using multiple snapservers
-    hpid = '{}:{}'.format(host, port)
-
-    groups = [SnapcastGroupDevice(group, hpid) for group in server.groups]
-    clients = [SnapcastClientDevice(client, hpid) for client in server.clients]
-    devices = groups + clients
-    hass.data[DATA_KEY] = devices
-    async_add_entities(devices)
+    # Create client entities and add listener to update clients on server update
+    _update_clients()
+    coordinator.async_add_listener(_update_clients)
 
 
-class SnapcastGroupDevice(MediaPlayerDevice):
-    """Representation of a Snapcast group device."""
-
-    def __init__(self, group, uid_part):
-        """Initialize the Snapcast group device."""
-        group.set_callback(self.schedule_update_ha_state)
-        self._group = group
-        self._uid = '{}{}_{}'.format(GROUP_PREFIX, uid_part,
-                                     self._group.identifier)
-
-    @property
-    def state(self):
-        """Return the state of the player."""
-        return {
-            'idle': STATE_IDLE,
-            'playing': STATE_PLAYING,
-            'unknown': STATE_UNKNOWN,
-        }.get(self._group.stream_status, STATE_UNKNOWN)
-
-    @property
-    def unique_id(self):
-        """Return the ID of snapcast group."""
-        return self._uid
-
-    @property
-    def name(self):
-        """Return the name of the device."""
-        return '{}{}'.format(GROUP_PREFIX, self._group.identifier)
-
-    @property
-    def source(self):
-        """Return the current input source."""
-        return self._group.stream
-
-    @property
-    def volume_level(self):
-        """Return the volume level."""
-        return self._group.volume / 100
-
-    @property
-    def is_volume_muted(self):
-        """Volume muted."""
-        return self._group.muted
-
-    @property
-    def supported_features(self):
-        """Flag media player features that are supported."""
-        return SUPPORT_SNAPCAST_GROUP
-
-    @property
-    def source_list(self):
-        """List of available input sources."""
-        return list(self._group.streams_by_name().keys())
-
-    @property
-    def device_state_attributes(self):
-        """Return the state attributes."""
-        name = '{} {}'.format(self._group.friendly_name, GROUP_SUFFIX)
-        return {
-            'friendly_name': name
-        }
-
-    @property
-    def should_poll(self):
-        """Do not poll for state."""
-        return False
-
-    async def async_select_source(self, source):
-        """Set input source."""
-        streams = self._group.streams_by_name()
-        if source in streams:
-            await self._group.set_stream(streams[source].identifier)
-            self.async_schedule_update_ha_state()
-
-    async def async_mute_volume(self, mute):
-        """Send the mute command."""
-        await self._group.set_muted(mute)
-        self.async_schedule_update_ha_state()
-
-    async def async_set_volume_level(self, volume):
-        """Set the volume level."""
-        await self._group.set_volume(round(volume * 100))
-        self.async_schedule_update_ha_state()
-
-    def snapshot(self):
-        """Snapshot the group state."""
-        self._group.snapshot()
-
-    async def async_restore(self):
-        """Restore the group state."""
-        await self._group.restore()
-
-
-class SnapcastClientDevice(MediaPlayerDevice):
+class SnapcastClientDevice(SnapcastCoordinatorEntity, MediaPlayerEntity):
     """Representation of a Snapcast client device."""
 
-    def __init__(self, client, uid_part):
-        """Initialize the Snapcast client device."""
-        client.set_callback(self.schedule_update_ha_state)
-        self._client = client
-        self._uid = '{}{}_{}'.format(CLIENT_PREFIX, uid_part,
-                                     self._client.identifier)
+    _attr_should_poll = False
+    _attr_supported_features = (
+        MediaPlayerEntityFeature.VOLUME_MUTE
+        | MediaPlayerEntityFeature.VOLUME_SET
+        | MediaPlayerEntityFeature.SELECT_SOURCE
+        | MediaPlayerEntityFeature.GROUPING
+    )
+    _attr_media_content_type = MediaType.MUSIC
+    _attr_device_class = MediaPlayerDeviceClass.SPEAKER
+    _device: Snapclient
+
+    def __init__(
+        self,
+        coordinator: SnapcastUpdateCoordinator,
+        device: Snapclient,
+    ) -> None:
+        """Initialize the base device."""
+        super().__init__(coordinator)
+
+        self._device = device
+        self._attr_unique_id = self.get_unique_id(
+            coordinator.host_id, device.identifier
+        )
+
+    @classmethod
+    def get_unique_id(cls, host, id) -> str:
+        """Get a unique ID for a client."""
+        return f"{CLIENT_PREFIX}{host}_{id}"
 
     @property
-    def unique_id(self):
-        """
-        Return the ID of this snapcast client.
+    def _current_group(self) -> Snapgroup | None:
+        """Return the group the client is associated with."""
+        return self._device.group
 
-        Note: Host part is needed, when using multiple snapservers
-        """
-        return self._uid
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to events."""
+        await super().async_added_to_hass()
+        self._device.set_callback(self.schedule_update_ha_state)
+
+    @override
+    async def async_will_remove_from_hass(self) -> None:
+        """Disconnect object when removed."""
+        self._device.set_callback(None)
 
     @property
-    def name(self):
+    def identifier(self) -> str:
+        """Return the snapcast identifier."""
+        return self._device.identifier
+
+    @property
+    @override
+    def name(self) -> str:
         """Return the name of the device."""
-        return '{}{}'.format(CLIENT_PREFIX, self._client.identifier)
+        return f"{self._device.friendly_name} {CLIENT_SUFFIX}"
 
     @property
-    def volume_level(self):
-        """Return the volume level."""
-        return self._client.volume / 100
-
-    @property
-    def is_volume_muted(self):
-        """Volume muted."""
-        return self._client.muted
-
-    @property
-    def supported_features(self):
-        """Flag media player features that are supported."""
-        return SUPPORT_SNAPCAST_CLIENT
-
-    @property
-    def state(self):
+    @override
+    def state(self) -> MediaPlayerState | None:
         """Return the state of the player."""
-        if self._client.connected:
-            return STATE_ON
-        return STATE_OFF
+        if self._device.connected:
+            if (
+                self.is_volume_muted
+                or self._current_group is None
+                or self._current_group.muted
+            ):
+                return MediaPlayerState.IDLE
+            try:
+                return STREAM_STATUS.get(self._current_group.stream_status)
+            except KeyError:
+                pass
+
+        return MediaPlayerState.OFF
 
     @property
-    def device_state_attributes(self):
+    @override
+    def extra_state_attributes(self) -> Mapping[str, Any]:
         """Return the state attributes."""
-        name = '{} {}'.format(self._client.friendly_name, CLIENT_SUFFIX)
-        return {
-            'friendly_name': name
-        }
+        state_attrs = {}
+        if self.latency is not None:
+            state_attrs["latency"] = self.latency
+        return state_attrs
 
     @property
-    def should_poll(self):
-        """Do not poll for state."""
-        return False
+    def latency(self) -> float | None:
+        """Return current latency."""
+        return self._device.latency
 
-    async def async_mute_volume(self, mute):
+    @property
+    @override
+    def source(self) -> str | None:
+        """Return the current input source."""
+        if self._current_group is None:
+            return None
+
+        return self._current_group.stream
+
+    @property
+    @override
+    def source_list(self) -> list[str]:
+        """List of available input sources."""
+        if self._current_group is None:
+            return []
+
+        return list(self._current_group.streams_by_name().keys())
+
+    @override
+    async def async_select_source(self, source: str) -> None:
+        """Set input source."""
+        if self._current_group is None:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="select_source_no_group",
+                translation_placeholders={
+                    "entity_id": self.entity_id,
+                    "source": source,
+                },
+            )
+
+        streams = self._current_group.streams_by_name()
+        if source in streams:
+            await self._current_group.set_stream(streams[source].identifier)
+            self.async_write_ha_state()
+
+    @property
+    @override
+    def is_volume_muted(self) -> bool:
+        """Volume muted."""
+        return self._device.muted
+
+    @override
+    async def async_mute_volume(self, mute: bool) -> None:
         """Send the mute command."""
-        await self._client.set_muted(mute)
-        self.async_schedule_update_ha_state()
+        await self._device.set_muted(mute)
+        self.async_write_ha_state()
 
-    async def async_set_volume_level(self, volume):
+    @property
+    @override
+    def volume_level(self) -> float:
+        """Return the volume level."""
+        return self._device.volume / 100
+
+    @override
+    async def async_set_volume_level(self, volume: float) -> None:
         """Set the volume level."""
-        await self._client.set_volume(round(volume * 100))
-        self.async_schedule_update_ha_state()
+        await self._device.set_volume(round(volume * 100))
+        self.async_write_ha_state()
 
-    def snapshot(self):
-        """Snapshot the client state."""
-        self._client.snapshot()
+    async def async_snapshot(self) -> None:
+        """Snapshot the group state."""
+        self._device.snapshot()
 
-    async def async_restore(self):
-        """Restore the client state."""
-        await self._client.restore()
+    async def async_restore(self) -> None:
+        """Restore the group state."""
+        await self._device.restore()
+        self.async_write_ha_state()
+
+    async def async_set_latency(self, latency) -> None:
+        """Set the latency of the client."""
+        await self._device.set_latency(latency)
+        self.async_write_ha_state()
+
+    @property
+    @override
+    def group_members(self) -> list[str] | None:
+        """List of players currently grouped for synchronous playback."""
+        if self._current_group is None:
+            return None
+
+        entity_registry = er.async_get(self.hass)
+        return [
+            entity_id
+            for client_id in self._current_group.clients
+            if (
+                entity_id := entity_registry.async_get_entity_id(
+                    MEDIA_PLAYER_DOMAIN,
+                    DOMAIN,
+                    self.get_unique_id(self.coordinator.host_id, client_id),
+                )
+            )
+        ]
+
+    @override
+    async def async_join_players(self, group_members: list[str]) -> None:
+        """Add `group_members` to this client's current group."""
+        if self._current_group is None:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="join_players_no_group",
+                translation_placeholders={
+                    "entity_id": self.entity_id,
+                },
+            )
+
+        # Get the client entity for each group member excluding self
+        entity_registry = er.async_get(self.hass)
+        clients = [
+            entity
+            for entity_id in group_members
+            if (entity := entity_registry.async_get(entity_id))
+            and entity.unique_id != self.unique_id
+        ]
+
+        # Get unique ID prefix for this host
+        unique_id_prefix = self.get_unique_id(self.coordinator.host_id, "")
+        for client in clients:
+            # Validate entity is a snapcast client
+            if not client.unique_id.startswith(CLIENT_PREFIX):
+                raise ServiceValidationError(
+                    f"Entity '{client.entity_id}' is not a Snapcast client device."
+                )
+
+            # Validate client belongs to the same server
+            if not client.unique_id.startswith(unique_id_prefix):
+                raise ServiceValidationError(
+                    f"Entity '{client.entity_id}' does not belong"
+                    " to the same Snapcast server."
+                )
+
+            # Extract client ID and join it to the current group
+            identifier = client.unique_id.removeprefix(unique_id_prefix)
+            try:
+                await self._current_group.add_client(identifier)
+            except KeyError as e:
+                raise ServiceValidationError(
+                    f"Client with identifier '{identifier}'"
+                    " does not exist on the server."
+                ) from e
+
+        self.async_write_ha_state()
+
+    @override
+    async def async_unjoin_player(self) -> None:
+        """Remove this client from its current group."""
+        if self._current_group is None:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="unjoin_no_group",
+                translation_placeholders={
+                    "entity_id": self.entity_id,
+                },
+            )
+
+        await self._current_group.remove_client(self._device.identifier)
+        self.async_write_ha_state()
+
+    @property
+    def metadata(self) -> Mapping[str, Any]:
+        """Get metadata from the current stream."""
+        if self._current_group is None:
+            return {}
+
+        try:
+            if metadata := self.coordinator.server.stream(
+                self._current_group.stream
+            ).metadata:
+                return metadata
+        except (
+            KeyError
+        ):  # the stream function raises KeyError if the stream does not exist
+            pass
+
+        # Fallback to an empty dict
+        return {}
+
+    @property
+    @override
+    def media_title(self) -> str | None:
+        """Title of current playing media."""
+        return self.metadata.get("title")
+
+    @property
+    @override
+    def media_image_url(self) -> str | None:
+        """Image url of current playing media."""
+        return self.metadata.get("artUrl")
+
+    @property
+    @override
+    def media_artist(self) -> str | None:
+        """Artist of current playing media, music track only."""
+        if (value := self.metadata.get("artist")) is not None:
+            return ", ".join(value)
+
+        return None
+
+    @property
+    @override
+    def media_album_name(self) -> str | None:
+        """Album name of current playing media, music track only."""
+        return self.metadata.get("album")
+
+    @property
+    @override
+    def media_album_artist(self) -> str | None:
+        """Album artist of current playing media, music track only."""
+        if (value := self.metadata.get("albumArtist")) is not None:
+            return ", ".join(value)
+
+        return None
+
+    @property
+    @override
+    def media_track(self) -> int | None:
+        """Track number of current playing media, music track only."""
+        if (value := self.metadata.get("trackNumber")) is not None:
+            return int(value)
+
+        return None
+
+    @property
+    @override
+    def media_duration(self) -> int | None:
+        """Duration of current playing media in seconds."""
+        if (value := self.metadata.get("duration")) is not None:
+            return int(value)
+
+        return None
+
+    @property
+    @override
+    def media_position(self) -> int | None:
+        """Position of current playing media in seconds."""
+        if self._current_group is None:
+            return None
+
+        try:
+            # Position is part of properties object, not metadata object
+            if properties := self.coordinator.server.stream(
+                self._current_group.stream
+            ).properties:
+                if (value := properties.get("position")) is not None:
+                    return int(value)
+        except (
+            KeyError
+        ):  # the stream function raises KeyError if the stream does not exist
+            pass
+        return None

@@ -1,85 +1,88 @@
 """Support for INSTEON fans via PowerLinc Modem."""
-import logging
 
-from homeassistant.components.fan import (
-    SPEED_HIGH, SPEED_LOW, SPEED_MEDIUM, SPEED_OFF, SUPPORT_SET_SPEED,
-    FanEntity)
-from homeassistant.const import STATE_OFF
+import math
+from typing import Any, override
 
-from . import InsteonEntity
+from homeassistant.components.fan import FanEntity, FanEntityFeature
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util.percentage import (
+    percentage_to_ranged_value,
+    ranged_value_to_percentage,
+)
 
-_LOGGER = logging.getLogger(__name__)
+from .const import SIGNAL_ADD_ENTITIES
+from .entity import InsteonEntity
+from .utils import async_add_insteon_devices, async_add_insteon_entities
 
-SPEED_TO_HEX = {
-    SPEED_OFF: 0x00,
-    SPEED_LOW: 0x3f,
-    SPEED_MEDIUM: 0xbe,
-    SPEED_HIGH: 0xff,
-}
-
-FAN_SPEEDS = [STATE_OFF, SPEED_LOW, SPEED_MEDIUM, SPEED_HIGH]
-
-
-async def async_setup_platform(
-        hass, config, async_add_entities, discovery_info=None):
-    """Set up the INSTEON device class for the hass platform."""
-    insteon_modem = hass.data['insteon'].get('modem')
-
-    address = discovery_info['address']
-    device = insteon_modem.devices[address]
-    state_key = discovery_info['state_key']
-
-    _LOGGER.debug('Adding device %s entity %s to Fan platform',
-                  device.address.hex, device.states[state_key].name)
-
-    new_entity = InsteonFan(device, state_key)
-
-    async_add_entities([new_entity])
+SPEED_RANGE = (1, 255)  # off is not included
 
 
-class InsteonFan(InsteonEntity, FanEntity):
-    """An INSTEON fan component."""
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the Insteon fans from a config entry."""
+
+    @callback
+    def async_add_insteon_fan_entities(discovery_info=None):
+        """Add the Insteon entities for the platform."""
+        async_add_insteon_entities(
+            hass, Platform.FAN, InsteonFanEntity, async_add_entities, discovery_info
+        )
+
+    signal = f"{SIGNAL_ADD_ENTITIES}_{Platform.FAN}"
+    async_dispatcher_connect(hass, signal, async_add_insteon_fan_entities)
+    async_add_insteon_devices(
+        hass,
+        Platform.FAN,
+        InsteonFanEntity,
+        async_add_entities,
+    )
+
+
+class InsteonFanEntity(InsteonEntity, FanEntity):
+    """An INSTEON fan entity."""
+
+    _attr_supported_features = (
+        FanEntityFeature.SET_SPEED
+        | FanEntityFeature.TURN_OFF
+        | FanEntityFeature.TURN_ON
+    )
+    _attr_speed_count = 3
 
     @property
-    def speed(self) -> str:
-        """Return the current speed."""
-        return self._hex_to_speed(self._insteon_device_state.value)
+    @override
+    def percentage(self) -> int | None:
+        """Return the current speed percentage."""
+        if self._insteon_device_group.value is None:
+            return None
+        return ranged_value_to_percentage(SPEED_RANGE, self._insteon_device_group.value)
 
-    @property
-    def speed_list(self) -> list:
-        """Get the list of available speeds."""
-        return FAN_SPEEDS
+    @override
+    async def async_turn_on(
+        self,
+        percentage: int | None = None,
+        preset_mode: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Turn on the fan."""
+        await self.async_set_percentage(percentage or 67)
 
-    @property
-    def supported_features(self) -> int:
-        """Flag supported features."""
-        return SUPPORT_SET_SPEED
+    @override
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn off the fan."""
+        await self._insteon_device.async_fan_off()
 
-    async def async_turn_on(self, speed: str = None, **kwargs) -> None:
-        """Turn on the entity."""
-        if speed is None:
-            speed = SPEED_MEDIUM
-        await self.async_set_speed(speed)
-
-    async def async_turn_off(self, **kwargs) -> None:
-        """Turn off the entity."""
-        await self.async_set_speed(SPEED_OFF)
-
-    async def async_set_speed(self, speed: str) -> None:
-        """Set the speed of the fan."""
-        fan_speed = SPEED_TO_HEX[speed]
-        if fan_speed == 0x00:
-            self._insteon_device_state.off()
-        else:
-            self._insteon_device_state.set_level(fan_speed)
-
-    @staticmethod
-    def _hex_to_speed(speed: int):
-        hex_speed = SPEED_OFF
-        if speed > 0xfe:
-            hex_speed = SPEED_HIGH
-        elif speed > 0x7f:
-            hex_speed = SPEED_MEDIUM
-        elif speed > 0:
-            hex_speed = SPEED_LOW
-        return hex_speed
+    @override
+    async def async_set_percentage(self, percentage: int) -> None:
+        """Set the speed percentage of the fan."""
+        if percentage == 0:
+            await self.async_turn_off()
+            return
+        on_level = math.ceil(percentage_to_ranged_value(SPEED_RANGE, percentage))
+        await self._insteon_device.async_on(group=2, on_level=on_level)

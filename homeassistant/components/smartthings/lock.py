@@ -1,73 +1,81 @@
 """Support for locks through the SmartThings cloud API."""
-from typing import Optional, Sequence
 
-from pysmartthings import Attribute, Capability
+from typing import Any, override
 
-from homeassistant.components.lock import LockDevice
+from pysmartthings import Attribute, Capability, Command
 
-from . import SmartThingsEntity
-from .const import DATA_BROKERS, DOMAIN
+from homeassistant.components.lock import LockEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-ST_STATE_LOCKED = 'locked'
+from . import SmartThingsConfigEntry
+from .const import MAIN
+from .entity import SmartThingsEntity
+
+ST_STATE_LOCKED = "locked"
 ST_LOCK_ATTR_MAP = {
-    'codeId': 'code_id',
-    'codeName': 'code_name',
-    'lockName': 'lock_name',
-    'method': 'method',
-    'timeout': 'timeout',
-    'usedCode': 'used_code'
+    "codeId": "code_id",
+    "codeName": "code_name",
+    "lockName": "lock_name",
+    "method": "method",
+    "timeout": "timeout",
+    "usedCode": "used_code",
 }
 
 
-async def async_setup_platform(
-        hass, config, async_add_entities, discovery_info=None):
-    """Platform uses config entry setup."""
-    pass
-
-
-async def async_setup_entry(hass, config_entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: SmartThingsConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     """Add locks for a config entry."""
-    broker = hass.data[DOMAIN][DATA_BROKERS][config_entry.entry_id]
+    entry_data = entry.runtime_data
     async_add_entities(
-        [SmartThingsLock(device) for device in broker.devices.values()
-         if broker.any_assigned(device.device_id, 'lock')])
+        SmartThingsLock(entry_data.client, device, {Capability.LOCK})
+        for device in entry_data.devices.values()
+        if Capability.LOCK in device.status[MAIN]
+    )
 
 
-def get_capabilities(capabilities: Sequence[str]) -> Optional[Sequence[str]]:
-    """Return all capabilities supported if minimum required are present."""
-    if Capability.lock in capabilities:
-        return [Capability.lock]
-    return None
-
-
-class SmartThingsLock(SmartThingsEntity, LockDevice):
+class SmartThingsLock(SmartThingsEntity, LockEntity):
     """Define a SmartThings lock."""
 
-    async def async_lock(self, **kwargs):
+    _attr_name = None
+
+    @override
+    async def async_lock(self, **kwargs: Any) -> None:
         """Lock the device."""
-        await self._device.lock(set_status=True)
-        self.async_schedule_update_ha_state()
+        await self.execute_device_command(
+            Capability.LOCK,
+            Command.LOCK,
+        )
 
-    async def async_unlock(self, **kwargs):
+    @override
+    async def async_unlock(self, **kwargs: Any) -> None:
         """Unlock the device."""
-        await self._device.unlock(set_status=True)
-        self.async_schedule_update_ha_state()
+        await self.execute_device_command(
+            Capability.LOCK,
+            Command.UNLOCK,
+        )
 
     @property
-    def is_locked(self):
+    @override
+    def is_locked(self) -> bool:
         """Return true if lock is locked."""
-        return self._device.status.lock == ST_STATE_LOCKED
+        return (
+            self.get_attribute_value(Capability.LOCK, Attribute.LOCK) == ST_STATE_LOCKED
+        )
 
     @property
-    def device_state_attributes(self):
+    @override
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Return device specific state attributes."""
         state_attrs = {}
-        status = self._device.status.attributes[Attribute.lock]
+        status = self._internal_state[Capability.LOCK][Attribute.LOCK]
         if status.value:
-            state_attrs['lock_state'] = status.value
+            state_attrs["lock_state"] = status.value
         if isinstance(status.data, dict):
             for st_attr, ha_attr in ST_LOCK_ATTR_MAP.items():
-                data_val = status.data.get(st_attr)
-                if data_val is not None:
+                if (data_val := status.data.get(st_attr)) is not None:
                     state_attrs[ha_attr] = data_val
         return state_attrs

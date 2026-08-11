@@ -1,141 +1,143 @@
 """Support for AlarmDecoder-based alarm control panels (Honeywell/DSC)."""
-import logging
 
-import voluptuous as vol
+from typing import override
 
-import homeassistant.components.alarm_control_panel as alarm
-from homeassistant.const import (
-    ATTR_CODE, STATE_ALARM_ARMED_AWAY, STATE_ALARM_ARMED_HOME,
-    STATE_ALARM_DISARMED, STATE_ALARM_TRIGGERED)
-import homeassistant.helpers.config_validation as cv
+from homeassistant.components.alarm_control_panel import (
+    AlarmControlPanelEntity,
+    AlarmControlPanelEntityFeature,
+    AlarmControlPanelState,
+    CodeFormat,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from . import DATA_AD, SIGNAL_PANEL_MESSAGE
+from . import AlarmDecoderConfigEntry
+from .const import (
+    CONF_ALT_NIGHT_MODE,
+    CONF_AUTO_BYPASS,
+    CONF_CODE_ARM_REQUIRED,
+    DEFAULT_ARM_OPTIONS,
+    OPTIONS_ARM,
+    SIGNAL_PANEL_MESSAGE,
+)
+from .entity import AlarmDecoderEntity
 
-_LOGGER = logging.getLogger(__name__)
 
-SERVICE_ALARM_TOGGLE_CHIME = 'alarmdecoder_alarm_toggle_chime'
-ALARM_TOGGLE_CHIME_SCHEMA = vol.Schema({
-    vol.Required(ATTR_CODE): cv.string,
-})
-
-
-def setup_platform(hass, config, add_entities, discovery_info=None):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AlarmDecoderConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     """Set up for AlarmDecoder alarm panels."""
-    device = AlarmDecoderAlarmPanel()
-    add_entities([device])
+    options = entry.options
+    arm_options = options.get(OPTIONS_ARM, DEFAULT_ARM_OPTIONS)
 
-    def alarm_toggle_chime_handler(service):
-        """Register toggle chime handler."""
-        code = service.data.get(ATTR_CODE)
-        device.alarm_toggle_chime(code)
+    entity = AlarmDecoderAlarmPanel(
+        client=entry.runtime_data.client,
+        auto_bypass=arm_options[CONF_AUTO_BYPASS],
+        code_arm_required=arm_options[CONF_CODE_ARM_REQUIRED],
+        alt_night_mode=arm_options[CONF_ALT_NIGHT_MODE],
+    )
+    async_add_entities([entity])
 
-    hass.services.register(
-        alarm.DOMAIN, SERVICE_ALARM_TOGGLE_CHIME, alarm_toggle_chime_handler,
-        schema=ALARM_TOGGLE_CHIME_SCHEMA)
 
-
-class AlarmDecoderAlarmPanel(alarm.AlarmControlPanel):
+class AlarmDecoderAlarmPanel(AlarmDecoderEntity, AlarmControlPanelEntity):
     """Representation of an AlarmDecoder-based alarm panel."""
 
-    def __init__(self):
-        """Initialize the alarm panel."""
-        self._display = ""
-        self._name = "Alarm Panel"
-        self._state = None
-        self._ac_power = None
-        self._backlight_on = None
-        self._battery_low = None
-        self._check_zone = None
-        self._chime = None
-        self._entry_delay_off = None
-        self._programming_mode = None
-        self._ready = None
-        self._zone_bypassed = None
+    _attr_name = "Alarm Panel"
+    _attr_should_poll = False
+    _attr_code_format = CodeFormat.NUMBER
+    _attr_supported_features = (
+        AlarmControlPanelEntityFeature.ARM_HOME
+        | AlarmControlPanelEntityFeature.ARM_AWAY
+        | AlarmControlPanelEntityFeature.ARM_NIGHT
+    )
 
-    async def async_added_to_hass(self):
+    def __init__(self, client, auto_bypass, code_arm_required, alt_night_mode):
+        """Initialize the alarm panel."""
+        super().__init__(client)
+        self._attr_unique_id = f"{client.serial_number}-panel"
+        self._auto_bypass = auto_bypass
+        self._attr_code_arm_required = code_arm_required
+        self._alt_night_mode = alt_night_mode
+
+    @override
+    async def async_added_to_hass(self) -> None:
         """Register callbacks."""
-        self.hass.helpers.dispatcher.async_dispatcher_connect(
-            SIGNAL_PANEL_MESSAGE, self._message_callback)
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, SIGNAL_PANEL_MESSAGE, self._message_callback
+            )
+        )
 
     def _message_callback(self, message):
         """Handle received messages."""
         if message.alarm_sounding or message.fire_alarm:
-            self._state = STATE_ALARM_TRIGGERED
+            self._attr_alarm_state = AlarmControlPanelState.TRIGGERED
         elif message.armed_away:
-            self._state = STATE_ALARM_ARMED_AWAY
+            self._attr_alarm_state = AlarmControlPanelState.ARMED_AWAY
+        elif message.armed_home and (message.entry_delay_off or message.perimeter_only):
+            self._attr_alarm_state = AlarmControlPanelState.ARMED_NIGHT
         elif message.armed_home:
-            self._state = STATE_ALARM_ARMED_HOME
+            self._attr_alarm_state = AlarmControlPanelState.ARMED_HOME
         else:
-            self._state = STATE_ALARM_DISARMED
+            self._attr_alarm_state = AlarmControlPanelState.DISARMED
 
-        self._ac_power = message.ac_power
-        self._backlight_on = message.backlight_on
-        self._battery_low = message.battery_low
-        self._check_zone = message.check_zone
-        self._chime = message.chime_on
-        self._entry_delay_off = message.entry_delay_off
-        self._programming_mode = message.programming_mode
-        self._ready = message.ready
-        self._zone_bypassed = message.zone_bypassed
-
+        self._attr_extra_state_attributes = {
+            "ac_power": message.ac_power,
+            "alarm_event_occurred": message.alarm_event_occurred,
+            "backlight_on": message.backlight_on,
+            "battery_low": message.battery_low,
+            "check_zone": message.check_zone,
+            "chime": message.chime_on,
+            "entry_delay_off": message.entry_delay_off,
+            "programming_mode": message.programming_mode,
+            "ready": message.ready,
+            "zone_bypassed": message.zone_bypassed,
+        }
         self.schedule_update_ha_state()
 
-    @property
-    def name(self):
-        """Return the name of the device."""
-        return self._name
-
-    @property
-    def should_poll(self):
-        """Return the polling state."""
-        return False
-
-    @property
-    def code_format(self):
-        """Return one or more digits/characters."""
-        return alarm.FORMAT_NUMBER
-
-    @property
-    def state(self):
-        """Return the state of the device."""
-        return self._state
-
-    @property
-    def device_state_attributes(self):
-        """Return the state attributes."""
-        return {
-            'ac_power': self._ac_power,
-            'backlight_on': self._backlight_on,
-            'battery_low': self._battery_low,
-            'check_zone': self._check_zone,
-            'chime': self._chime,
-            'entry_delay_off': self._entry_delay_off,
-            'programming_mode': self._programming_mode,
-            'ready': self._ready,
-            'zone_bypassed': self._zone_bypassed,
-        }
-
-    def alarm_disarm(self, code=None):
+    @override
+    def alarm_disarm(self, code: str | None = None) -> None:
         """Send disarm command."""
         if code:
-            self.hass.data[DATA_AD].send("{!s}1".format(code))
+            self._client.send(f"{code!s}1")
 
-    def alarm_arm_away(self, code=None):
+    @override
+    def alarm_arm_away(self, code: str | None = None) -> None:
         """Send arm away command."""
-        if code:
-            self.hass.data[DATA_AD].send("{!s}2".format(code))
+        self._client.arm_away(
+            code=code,
+            code_arm_required=self._attr_code_arm_required,
+            auto_bypass=self._auto_bypass,
+        )
 
-    def alarm_arm_home(self, code=None):
+    @override
+    def alarm_arm_home(self, code: str | None = None) -> None:
         """Send arm home command."""
-        if code:
-            self.hass.data[DATA_AD].send("{!s}3".format(code))
+        self._client.arm_home(
+            code=code,
+            code_arm_required=self._attr_code_arm_required,
+            auto_bypass=self._auto_bypass,
+        )
 
-    def alarm_arm_night(self, code=None):
+    @override
+    def alarm_arm_night(self, code: str | None = None) -> None:
         """Send arm night command."""
-        if code:
-            self.hass.data[DATA_AD].send("{!s}33".format(code))
+        self._client.arm_night(
+            code=code,
+            code_arm_required=self._attr_code_arm_required,
+            alt_night_mode=self._alt_night_mode,
+            auto_bypass=self._auto_bypass,
+        )
 
     def alarm_toggle_chime(self, code=None):
         """Send toggle chime command."""
         if code:
-            self.hass.data[DATA_AD].send("{!s}9".format(code))
+            self._client.send(f"{code!s}9")
+
+    def alarm_keypress(self, keypress):
+        """Send custom keypresses."""
+        if keypress:
+            self._client.send(keypress)

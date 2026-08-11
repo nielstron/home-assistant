@@ -1,8 +1,9 @@
 {
   "domain": "sensor",
   "name": "Sensor",
-  "documentation": "https://www.home-assistant.io/components/sensor",
-  "requirements": [],
-  "dependencies": [],
-  "codeowners": []
+  "after_dependencies": ["recorder"],
+  "codeowners": ["@home-assistant/core"],
+  "documentation": "https://www.home-assistant.io/integrations/sensor",
+  "integration_type": "entity",
+  "quality_scale": "internal"
 }

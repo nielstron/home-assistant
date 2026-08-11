@@ -1,13 +1,13 @@
 """Define constants for the Ambient PWS component."""
-DOMAIN = 'ambient_station'
 
-ATTR_LAST_DATA = 'last_data'
+import logging
 
-CONF_APP_KEY = 'app_key'
+DOMAIN = "ambient_station"
+LOGGER = logging.getLogger(__package__)
 
-DATA_CLIENT = 'data_client'
+ATTR_LAST_DATA = "last_data"
 
-TOPIC_UPDATE = 'update'
+CONF_APP_KEY = "app_key"
 
-TYPE_BINARY_SENSOR = 'binary_sensor'
-TYPE_SENSOR = 'sensor'
+TYPE_SOLARRADIATION = "solarradiation"
+TYPE_SOLARRADIATION_LX = "solarradiation_lx"

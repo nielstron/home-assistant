@@ -1,142 +1,61 @@
-"""Platform for retrieving energy data from SRP."""
-from datetime import datetime, timedelta
-import logging
+"""Support for SRP Energy Sensor."""
 
-from requests.exceptions import (
-    ConnectionError as ConnectError, HTTPError, Timeout)
-import voluptuous as vol
+from typing import override
 
-from homeassistant.const import (
-    CONF_NAME, CONF_PASSWORD, ENERGY_KILO_WATT_HOUR,
-    CONF_USERNAME, CONF_ID)
-import homeassistant.helpers.config_validation as cv
-from homeassistant.util import Throttle
-from homeassistant.components.sensor import PLATFORM_SCHEMA
-from homeassistant.helpers.entity import Entity
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
+from homeassistant.const import UnitOfEnergy
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.typing import StateType
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-_LOGGER = logging.getLogger(__name__)
-
-ATTRIBUTION = "Powered by SRP Energy"
-
-DEFAULT_NAME = 'SRP Energy'
-MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=1440)
-ENERGY_KWH = ENERGY_KILO_WATT_HOUR
-
-ATTR_READING_COST = "reading_cost"
-ATTR_READING_TIME = 'datetime'
-ATTR_READING_USAGE = 'reading_usage'
-ATTR_DAILY_USAGE = 'daily_usage'
-ATTR_USAGE_HISTORY = 'usage_history'
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_USERNAME): cv.string,
-    vol.Required(CONF_PASSWORD): cv.string,
-    vol.Required(CONF_ID): cv.string,
-    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string
-})
+from .const import DEVICE_CONFIG_URL, DEVICE_MANUFACTURER, DEVICE_MODEL, DOMAIN
+from .coordinator import SRPEnergyConfigEntry, SRPEnergyDataUpdateCoordinator
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up the SRP energy."""
-    name = config[CONF_NAME]
-    username = config[CONF_USERNAME]
-    password = config[CONF_PASSWORD]
-    account_id = config[CONF_ID]
-
-    from srpenergy.client import SrpEnergyClient
-
-    srp_client = SrpEnergyClient(account_id, username, password)
-
-    if not srp_client.validate():
-        _LOGGER.error("Couldn't connect to %s. Check credentials", name)
-        return
-
-    add_entities([SrpEnergy(name, srp_client)], True)
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: SRPEnergyConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the SRP Energy Usage sensor."""
+    async_add_entities([SrpEntity(entry.runtime_data, entry)])
 
 
-class SrpEnergy(Entity):
-    """Representation of an srp usage."""
+class SrpEntity(CoordinatorEntity[SRPEnergyDataUpdateCoordinator], SensorEntity):
+    """Implementation of a Srp Energy Usage sensor."""
 
-    def __init__(self, name, client):
-        """Initialize SRP Usage."""
-        self._state = None
-        self._name = name
-        self._client = client
-        self._history = None
-        self._usage = None
+    _attr_attribution = "Powered by SRP Energy"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_has_entity_name = True
+    _attr_translation_key = "energy_usage"
+
+    def __init__(
+        self,
+        coordinator: SRPEnergyDataUpdateCoordinator,
+        config_entry: SRPEnergyConfigEntry,
+    ) -> None:
+        """Initialize the SrpEntity class."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{config_entry.entry_id}_total_usage"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, config_entry.entry_id)},
+            name=f"SRP Energy {config_entry.title}",
+            entry_type=DeviceEntryType.SERVICE,
+            manufacturer=DEVICE_MANUFACTURER,
+            model=DEVICE_MODEL,
+            configuration_url=DEVICE_CONFIG_URL,
+        )
 
     @property
-    def attribution(self):
-        """Return the attribution."""
-        return ATTRIBUTION
-
-    @property
-    def state(self):
-        """Return the current state."""
-        if self._state is None:
-            return None
-
-        return "{0:.2f}".format(self._state)
-
-    @property
-    def name(self):
-        """Return the name of the sensor."""
-        return self._name
-
-    @property
-    def unit_of_measurement(self):
-        """Return the unit of measurement of this entity, if any."""
-        return ENERGY_KWH
-
-    @property
-    def history(self):
-        """Return the energy usage history of this entity, if any."""
-        if self._usage is None:
-            return None
-
-        history = [{
-            ATTR_READING_TIME: isodate,
-            ATTR_READING_USAGE: kwh,
-            ATTR_READING_COST: cost
-            } for _, _, isodate, kwh, cost in self._usage]
-
-        return history
-
-    @property
-    def device_state_attributes(self):
-        """Return the state attributes."""
-        attributes = {
-            ATTR_USAGE_HISTORY: self.history
-        }
-
-        return attributes
-
-    @Throttle(MIN_TIME_BETWEEN_UPDATES)
-    def update(self):
-        """Get the latest usage from SRP Energy."""
-        start_date = datetime.now() + timedelta(days=-1)
-        end_date = datetime.now()
-
-        try:
-
-            usage = self._client.usage(start_date, end_date)
-
-            daily_usage = 0.0
-            for _, _, _, kwh, _ in usage:
-                daily_usage += float(kwh)
-
-            if usage:
-
-                self._state = daily_usage
-                self._usage = usage
-
-            else:
-                _LOGGER.error("Unable to fetch data from SRP. No data")
-
-        except (ConnectError, HTTPError, Timeout) as error:
-            _LOGGER.error("Unable to connect to SRP. %s", error)
-        except ValueError as error:
-            _LOGGER.error("Value error connecting to SRP. %s", error)
-        except TypeError as error:
-            _LOGGER.error("Type error connecting to SRP. "
-                          "Check username and password. %s", error)
+    @override
+    def native_value(self) -> StateType:
+        """Return the state of the device."""
+        return self.coordinator.data

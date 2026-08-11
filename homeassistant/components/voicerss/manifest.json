@@ -1,8 +1,8 @@
 {
   "domain": "voicerss",
-  "name": "Voicerss",
-  "documentation": "https://www.home-assistant.io/components/voicerss",
-  "requirements": [],
-  "dependencies": [],
-  "codeowners": []
+  "name": "VoiceRSS",
+  "codeowners": [],
+  "documentation": "https://www.home-assistant.io/integrations/voicerss",
+  "iot_class": "cloud_push",
+  "quality_scale": "legacy"
 }

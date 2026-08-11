@@ -1,281 +1,282 @@
-"""
-Volumio Platform.
-
-For more details about this platform, please refer to the documentation at
-https://home-assistant.io/components/media_player.volumio/
+"""Volumio Platform.
 
 Volumio rest API: https://volumio.github.io/docs/API/REST_API.html
 """
-import asyncio
-from datetime import timedelta
-import logging
-import socket
 
-import aiohttp
-import voluptuous as vol
+from datetime import timedelta
+import json
+from typing import Any, override
 
 from homeassistant.components.media_player import (
-    MediaPlayerDevice, PLATFORM_SCHEMA)
-from homeassistant.components.media_player.const import (
-    MEDIA_TYPE_MUSIC, SUPPORT_CLEAR_PLAYLIST,
-    SUPPORT_NEXT_TRACK, SUPPORT_PAUSE, SUPPORT_PLAY, SUPPORT_PLAY_MEDIA,
-    SUPPORT_PREVIOUS_TRACK, SUPPORT_SEEK, SUPPORT_SELECT_SOURCE, SUPPORT_STOP,
-    SUPPORT_VOLUME_MUTE, SUPPORT_VOLUME_SET, SUPPORT_VOLUME_STEP)
-from homeassistant.const import (
-    CONF_HOST, CONF_NAME, CONF_PORT, STATE_IDLE, STATE_PAUSED, STATE_PLAYING)
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
-import homeassistant.helpers.config_validation as cv
+    BrowseMedia,
+    MediaPlayerEntity,
+    MediaPlayerEntityFeature,
+    MediaPlayerState,
+    MediaType,
+    RepeatMode,
+)
+from homeassistant.const import CONF_ID, CONF_NAME
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import Throttle
 
-_CONFIGURING = {}
-_LOGGER = logging.getLogger(__name__)
-
-DEFAULT_HOST = 'localhost'
-DEFAULT_NAME = 'Volumio'
-DEFAULT_PORT = 3000
-
-DATA_VOLUMIO = 'volumio'
-
-TIMEOUT = 10
-
-SUPPORT_VOLUMIO = SUPPORT_PAUSE | SUPPORT_VOLUME_SET | SUPPORT_VOLUME_MUTE | \
-    SUPPORT_PREVIOUS_TRACK | SUPPORT_NEXT_TRACK | SUPPORT_SEEK | \
-    SUPPORT_PLAY_MEDIA | SUPPORT_STOP | SUPPORT_PLAY | \
-    SUPPORT_VOLUME_STEP | SUPPORT_SELECT_SOURCE | SUPPORT_CLEAR_PLAYLIST
+from . import VolumioConfigEntry
+from .browse_media import browse_node, browse_top_level
+from .const import DOMAIN
 
 PLAYLIST_UPDATE_INTERVAL = timedelta(seconds=15)
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Optional(CONF_HOST, default=DEFAULT_HOST): cv.string,
-    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-    vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
-})
 
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: VolumioConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the Volumio media player platform."""
 
-async def async_setup_platform(hass, config, async_add_entities,
-                               discovery_info=None):
-    """Set up the Volumio platform."""
-    if DATA_VOLUMIO not in hass.data:
-        hass.data[DATA_VOLUMIO] = dict()
+    data = config_entry.runtime_data
+    volumio = data.volumio
+    info = data.info
+    uid = config_entry.data[CONF_ID]
+    name = config_entry.data[CONF_NAME]
 
-    # This is a manual configuration?
-    if discovery_info is None:
-        name = config.get(CONF_NAME)
-        host = config.get(CONF_HOST)
-        port = config.get(CONF_PORT)
-    else:
-        name = "{} ({})".format(DEFAULT_NAME, discovery_info.get('hostname'))
-        host = discovery_info.get('host')
-        port = discovery_info.get('port')
-
-    # Only add a device once, so discovered devices do not override manual
-    # config.
-    ip_addr = socket.gethostbyname(host)
-    if ip_addr in hass.data[DATA_VOLUMIO]:
-        return
-
-    entity = Volumio(name, host, port, hass)
-
-    hass.data[DATA_VOLUMIO][ip_addr] = entity
+    entity = Volumio(volumio, uid, name, info)
     async_add_entities([entity])
 
 
-class Volumio(MediaPlayerDevice):
+class Volumio(MediaPlayerEntity):
     """Volumio Player Object."""
 
-    def __init__(self, name, host, port, hass):
+    _attr_has_entity_name = True
+    _attr_name = None
+    _attr_media_content_type = MediaType.MUSIC
+    _attr_supported_features = (
+        MediaPlayerEntityFeature.PAUSE
+        | MediaPlayerEntityFeature.VOLUME_SET
+        | MediaPlayerEntityFeature.VOLUME_MUTE
+        | MediaPlayerEntityFeature.PREVIOUS_TRACK
+        | MediaPlayerEntityFeature.NEXT_TRACK
+        | MediaPlayerEntityFeature.STOP
+        | MediaPlayerEntityFeature.PLAY
+        | MediaPlayerEntityFeature.PLAY_MEDIA
+        | MediaPlayerEntityFeature.VOLUME_STEP
+        | MediaPlayerEntityFeature.SELECT_SOURCE
+        | MediaPlayerEntityFeature.REPEAT_SET
+        | MediaPlayerEntityFeature.SHUFFLE_SET
+        | MediaPlayerEntityFeature.CLEAR_PLAYLIST
+        | MediaPlayerEntityFeature.BROWSE_MEDIA
+    )
+
+    def __init__(self, volumio, uid, name, info):
         """Initialize the media player."""
-        self.host = host
-        self.port = port
-        self.hass = hass
-        self._url = '{}:{}'.format(host, str(port))
-        self._name = name
+        self._volumio = volumio
+        unique_id = uid
         self._state = {}
-        self._lastvol = self._state.get('volume', 0)
-        self._playlists = []
-        self._currentplaylist = None
+        self.thumbnail_cache = {}
+        self._attr_source_list = []
+        self._attr_unique_id = unique_id
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, unique_id)},
+            manufacturer="Volumio",
+            model=info["hardware"],
+            name=name,
+            sw_version=info["systemversion"],
+        )
 
-    async def send_volumio_msg(self, method, params=None):
-        """Send message."""
-        url = "http://{}:{}/api/v1/{}/".format(self.host, self.port, method)
-
-        _LOGGER.debug("URL: %s params: %s", url, params)
-
-        try:
-            websession = async_get_clientsession(self.hass)
-            response = await websession.get(url, params=params)
-            if response.status == 200:
-                data = await response.json()
-            else:
-                _LOGGER.error(
-                    "Query failed, response code: %s Full message: %s",
-                    response.status, response)
-                return False
-
-        except (asyncio.TimeoutError, aiohttp.ClientError) as error:
-            _LOGGER.error(
-                "Failed communicating with Volumio '%s': %s",
-                self._name, type(error))
-            return False
-
-        try:
-            return data
-        except AttributeError:
-            _LOGGER.error("Received invalid response: %s", data)
-            return False
-
-    async def async_update(self):
+    async def async_update(self) -> None:
         """Update state."""
-        resp = await self.send_volumio_msg('getState')
+        self._state = await self._volumio.get_state()
         await self._async_update_playlists()
-        if resp is False:
-            return
-        self._state = resp.copy()
 
     @property
-    def media_content_type(self):
-        """Content type of current playing media."""
-        return MEDIA_TYPE_MUSIC
-
-    @property
-    def state(self):
+    @override
+    def state(self) -> MediaPlayerState:
         """Return the state of the device."""
-        status = self._state.get('status', None)
-        if status == 'pause':
-            return STATE_PAUSED
-        if status == 'play':
-            return STATE_PLAYING
+        status = self._state.get("status", None)
+        if status == "pause":
+            return MediaPlayerState.PAUSED
+        if status == "play":
+            return MediaPlayerState.PLAYING
 
-        return STATE_IDLE
+        return MediaPlayerState.IDLE
 
     @property
+    @override
     def media_title(self):
         """Title of current playing media."""
-        return self._state.get('title', None)
+        return self._state.get("title", None)
 
     @property
+    @override
     def media_artist(self):
         """Artist of current playing media (Music track only)."""
-        return self._state.get('artist', None)
+        return self._state.get("artist", None)
 
     @property
+    @override
     def media_album_name(self):
         """Artist of current playing media (Music track only)."""
-        return self._state.get('album', None)
+        return self._state.get("album", None)
 
     @property
+    @override
     def media_image_url(self):
         """Image url of current playing media."""
-        url = self._state.get('albumart', None)
-        if url is None:
-            return
-        if str(url[0:2]).lower() == 'ht':
-            mediaurl = url
-        else:
-            mediaurl = "http://{}:{}{}".format(self.host, self.port, url)
-        return mediaurl
+        url = self._state.get("albumart", None)
+        return self._volumio.canonic_url(url)
 
     @property
     def media_seek_position(self):
         """Time in seconds of current seek position."""
-        return self._state.get('seek', None)
+        return self._state.get("seek", None)
 
     @property
+    @override
     def media_duration(self):
         """Time in seconds of current song duration."""
-        return self._state.get('duration', None)
+        return self._state.get("duration", None)
 
     @property
+    @override
     def volume_level(self):
         """Volume level of the media player (0..1)."""
-        volume = self._state.get('volume', None)
+        volume = self._state.get("volume", None)
         if volume is not None and volume != "":
             volume = int(volume) / 100
         return volume
 
     @property
+    @override
     def is_volume_muted(self):
         """Boolean if volume is currently muted."""
-        return self._state.get('mute', None)
+        return self._state.get("mute", None)
 
     @property
-    def name(self):
-        """Return the name of the device."""
-        return self._name
+    @override
+    def shuffle(self):
+        """Boolean if shuffle is enabled."""
+        return self._state.get("random", False)
 
     @property
-    def source_list(self):
-        """Return the list of available input sources."""
-        return self._playlists
+    @override
+    def repeat(self) -> RepeatMode:
+        """Return current repeat mode."""
+        if self._state.get("repeat", None):
+            return RepeatMode.ALL
+        return RepeatMode.OFF
 
-    @property
-    def source(self):
-        """Name of the current input source."""
-        return self._currentplaylist
-
-    @property
-    def supported_features(self):
-        """Flag of media commands that are supported."""
-        return SUPPORT_VOLUMIO
-
-    def async_media_next_track(self):
+    @override
+    async def async_media_next_track(self) -> None:
         """Send media_next command to media player."""
-        return self.send_volumio_msg('commands', params={'cmd': 'next'})
+        await self._volumio.next()
 
-    def async_media_previous_track(self):
+    @override
+    async def async_media_previous_track(self) -> None:
         """Send media_previous command to media player."""
-        return self.send_volumio_msg('commands', params={'cmd': 'prev'})
+        await self._volumio.previous()
 
-    def async_media_play(self):
+    @override
+    async def async_media_play(self) -> None:
         """Send media_play command to media player."""
-        return self.send_volumio_msg('commands', params={'cmd': 'play'})
+        await self._volumio.play()
 
-    def async_media_pause(self):
+    @override
+    async def async_media_pause(self) -> None:
         """Send media_pause command to media player."""
-        if self._state['trackType'] == 'webradio':
-            return self.send_volumio_msg('commands', params={'cmd': 'stop'})
-        return self.send_volumio_msg('commands', params={'cmd': 'pause'})
+        if self._state.get("trackType") == "webradio":
+            await self._volumio.stop()
+        else:
+            await self._volumio.pause()
 
-    def async_set_volume_level(self, volume):
+    @override
+    async def async_media_stop(self) -> None:
+        """Send media_stop command to media player."""
+        await self._volumio.stop()
+
+    @override
+    async def async_set_volume_level(self, volume: float) -> None:
         """Send volume_up command to media player."""
-        return self.send_volumio_msg(
-            'commands', params={'cmd': 'volume', 'volume': int(volume * 100)})
+        await self._volumio.set_volume_level(int(volume * 100))
 
-    def async_volume_up(self):
+    @override
+    async def async_volume_up(self) -> None:
         """Service to send the Volumio the command for volume up."""
-        return self.send_volumio_msg(
-            'commands', params={'cmd': 'volume', 'volume': 'plus'})
+        await self._volumio.volume_up()
 
-    def async_volume_down(self):
+    @override
+    async def async_volume_down(self) -> None:
         """Service to send the Volumio the command for volume down."""
-        return self.send_volumio_msg(
-            'commands', params={'cmd': 'volume', 'volume': 'minus'})
+        await self._volumio.volume_down()
 
-    def async_mute_volume(self, mute):
+    @override
+    async def async_mute_volume(self, mute: bool) -> None:
         """Send mute command to media player."""
-        mutecmd = 'mute' if mute else 'unmute'
         if mute:
-            # mute is implemented as 0 volume, do save last volume level
-            self._lastvol = self._state['volume']
-            return self.send_volumio_msg(
-                'commands', params={'cmd': 'volume', 'volume': mutecmd})
+            await self._volumio.mute()
+        else:
+            await self._volumio.unmute()
 
-        return self.send_volumio_msg(
-            'commands', params={'cmd': 'volume', 'volume': self._lastvol})
+    @override
+    async def async_set_shuffle(self, shuffle: bool) -> None:
+        """Enable/disable shuffle mode."""
+        await self._volumio.set_shuffle(shuffle)
 
-    def async_select_source(self, source):
-        """Choose a different available playlist and play it."""
-        self._currentplaylist = source
-        return self.send_volumio_msg(
-            'commands', params={'cmd': 'playplaylist', 'name': source})
+    @override
+    async def async_set_repeat(self, repeat: RepeatMode) -> None:
+        """Set repeat mode."""
+        if repeat == RepeatMode.OFF:
+            await self._volumio.repeatAll("false")
+        else:
+            await self._volumio.repeatAll("true")
 
-    def async_clear_playlist(self):
+    @override
+    async def async_select_source(self, source: str) -> None:
+        """Choose an available playlist and play it."""
+        await self._volumio.play_playlist(source)
+        self._attr_source = source
+
+    @override
+    async def async_clear_playlist(self) -> None:
         """Clear players playlist."""
-        self._currentplaylist = None
-        return self.send_volumio_msg('commands',
-                                     params={'cmd': 'clearQueue'})
+        await self._volumio.clear_playlist()
+        self._attr_source = None
 
     @Throttle(PLAYLIST_UPDATE_INTERVAL)
     async def _async_update_playlists(self, **kwargs):
         """Update available Volumio playlists."""
-        self._playlists = await self.send_volumio_msg('listplaylists')
+        self._attr_source_list = await self._volumio.get_playlists()
+
+    @override
+    async def async_play_media(
+        self, media_type: MediaType | str, media_id: str, **kwargs: Any
+    ) -> None:
+        """Send the play_media command to the media player."""
+        await self._volumio.replace_and_play(json.loads(media_id))
+
+    @override
+    async def async_browse_media(
+        self,
+        media_content_type: MediaType | str | None = None,
+        media_content_id: str | None = None,
+    ) -> BrowseMedia:
+        """Implement the websocket media browsing helper."""
+        self.thumbnail_cache = {}
+        if media_content_type in (None, "library"):
+            return await browse_top_level(self._volumio)
+
+        return await browse_node(
+            self, self._volumio, media_content_type, media_content_id
+        )
+
+    @override
+    async def async_get_browse_image(
+        self,
+        media_content_type: MediaType | str,
+        media_content_id: str,
+        media_image_id: str | None = None,
+    ) -> tuple[bytes | None, str | None]:
+        """Get album art from Volumio."""
+        cached_url = self.thumbnail_cache.get(media_content_id)
+        image_url = self._volumio.canonic_url(cached_url)
+        return await self._async_fetch_image(image_url)

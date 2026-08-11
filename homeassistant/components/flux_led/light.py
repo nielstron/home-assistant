@@ -1,338 +1,381 @@
-"""Support for Flux lights."""
-import logging
-import socket
-import random
-from asyncio import sleep
-from functools import partial
+"""Support for Magic Home lights."""
 
+import ast
+import logging
+from typing import Any, Final, override
+
+from flux_led.const import MultiColorEffects
+from flux_led.protocol import MusicMode
+from flux_led.utils import rgbcw_brightness, rgbcw_to_rgbwc, rgbw_brightness
 import voluptuous as vol
 
-from homeassistant.const import CONF_DEVICES, CONF_NAME, CONF_PROTOCOL
 from homeassistant.components.light import (
-    ATTR_BRIGHTNESS, ATTR_HS_COLOR, ATTR_EFFECT, ATTR_WHITE_VALUE,
-    EFFECT_COLORLOOP, EFFECT_RANDOM, SUPPORT_BRIGHTNESS, SUPPORT_EFFECT,
-    SUPPORT_COLOR, SUPPORT_WHITE_VALUE, Light, PLATFORM_SCHEMA)
-import homeassistant.helpers.config_validation as cv
-import homeassistant.util.color as color_util
+    ATTR_BRIGHTNESS,
+    ATTR_COLOR_TEMP_KELVIN,
+    ATTR_EFFECT,
+    ATTR_RGB_COLOR,
+    ATTR_RGBW_COLOR,
+    ATTR_RGBWW_COLOR,
+    ATTR_WHITE,
+    ColorMode,
+    LightEntity,
+    LightEntityFeature,
+)
+from homeassistant.const import CONF_EFFECT
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_validation as cv, entity_platform
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.typing import VolDictType
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .const import (
+    CONF_COLORS,
+    CONF_CUSTOM_EFFECT_COLORS,
+    CONF_CUSTOM_EFFECT_SPEED_PCT,
+    CONF_CUSTOM_EFFECT_TRANSITION,
+    CONF_SPEED_PCT,
+    CONF_TRANSITION,
+    DEFAULT_EFFECT_SPEED,
+    MIN_CCT_BRIGHTNESS,
+    MIN_RGB_BRIGHTNESS,
+    MULTI_BRIGHTNESS_COLOR_MODES,
+    TRANSITION_GRADUAL,
+    TRANSITION_JUMP,
+    TRANSITION_STROBE,
+)
+from .coordinator import FluxLedConfigEntry, FluxLedUpdateCoordinator
+from .entity import FluxOnOffEntity
+from .util import (
+    _effect_brightness,
+    _flux_color_mode_to_hass,
+    _hass_color_modes,
+    _min_rgb_brightness,
+    _min_rgbw_brightness,
+    _min_rgbwc_brightness,
+    _str_to_multi_color_effect,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-CONF_AUTOMATIC_ADD = 'automatic_add'
-CONF_CUSTOM_EFFECT = 'custom_effect'
-CONF_COLORS = 'colors'
-CONF_SPEED_PCT = 'speed_pct'
-CONF_TRANSITION = 'transition'
-ATTR_MODE = 'mode'
-
-DOMAIN = 'flux_led'
-
-SUPPORT_FLUX_LED = (SUPPORT_BRIGHTNESS | SUPPORT_EFFECT |
-                    SUPPORT_COLOR)
-
-MODE_RGB = 'rgb'
-MODE_RGBW = 'rgbw'
-
-# This mode enables white value to be controlled by brightness.
-# RGB value is ignored when this mode is specified.
-MODE_WHITE = 'w'
-
-# List of supported effects which aren't already declared in LIGHT
-EFFECT_RED_FADE = 'red_fade'
-EFFECT_GREEN_FADE = 'green_fade'
-EFFECT_BLUE_FADE = 'blue_fade'
-EFFECT_YELLOW_FADE = 'yellow_fade'
-EFFECT_CYAN_FADE = 'cyan_fade'
-EFFECT_PURPLE_FADE = 'purple_fade'
-EFFECT_WHITE_FADE = 'white_fade'
-EFFECT_RED_GREEN_CROSS_FADE = 'rg_cross_fade'
-EFFECT_RED_BLUE_CROSS_FADE = 'rb_cross_fade'
-EFFECT_GREEN_BLUE_CROSS_FADE = 'gb_cross_fade'
-EFFECT_COLORSTROBE = 'colorstrobe'
-EFFECT_RED_STROBE = 'red_strobe'
-EFFECT_GREEN_STROBE = 'green_strobe'
-EFFECT_BLUE_STROBE = 'blue_strobe'
-EFFECT_YELLOW_STROBE = 'yellow_strobe'
-EFFECT_CYAN_STROBE = 'cyan_strobe'
-EFFECT_PURPLE_STROBE = 'purple_strobe'
-EFFECT_WHITE_STROBE = 'white_strobe'
-EFFECT_COLORJUMP = 'colorjump'
-EFFECT_CUSTOM = 'custom'
-
-EFFECT_MAP = {
-    EFFECT_COLORLOOP:             0x25,
-    EFFECT_RED_FADE:              0x26,
-    EFFECT_GREEN_FADE:            0x27,
-    EFFECT_BLUE_FADE:             0x28,
-    EFFECT_YELLOW_FADE:           0x29,
-    EFFECT_CYAN_FADE:             0x2a,
-    EFFECT_PURPLE_FADE:           0x2b,
-    EFFECT_WHITE_FADE:            0x2c,
-    EFFECT_RED_GREEN_CROSS_FADE:  0x2d,
-    EFFECT_RED_BLUE_CROSS_FADE:   0x2e,
-    EFFECT_GREEN_BLUE_CROSS_FADE: 0x2f,
-    EFFECT_COLORSTROBE:           0x30,
-    EFFECT_RED_STROBE:            0x31,
-    EFFECT_GREEN_STROBE:          0x32,
-    EFFECT_BLUE_STROBE:           0x33,
-    EFFECT_YELLOW_STROBE:         0x34,
-    EFFECT_CYAN_STROBE:           0x35,
-    EFFECT_PURPLE_STROBE:         0x36,
-    EFFECT_WHITE_STROBE:          0x37,
-    EFFECT_COLORJUMP:             0x38
+MODE_ATTRS = {
+    ATTR_EFFECT,
+    ATTR_COLOR_TEMP_KELVIN,
+    ATTR_RGB_COLOR,
+    ATTR_RGBW_COLOR,
+    ATTR_RGBWW_COLOR,
+    ATTR_WHITE,
 }
-EFFECT_CUSTOM_CODE = 0x60
 
-TRANSITION_GRADUAL = 'gradual'
-TRANSITION_JUMP = 'jump'
-TRANSITION_STROBE = 'strobe'
+ATTR_FOREGROUND_COLOR: Final = "foreground_color"
+ATTR_BACKGROUND_COLOR: Final = "background_color"
+ATTR_SENSITIVITY: Final = "sensitivity"
+ATTR_LIGHT_SCREEN: Final = "light_screen"
 
-FLUX_EFFECT_LIST = sorted(list(EFFECT_MAP)) + [EFFECT_RANDOM]
+# Constant color temp values for 2 flux_led special modes
+# Warm-white and Cool-white modes
+COLOR_TEMP_WARM_VS_COLD_WHITE_CUT_OFF: Final = 285
 
-CUSTOM_EFFECT_SCHEMA = vol.Schema({
-    vol.Required(CONF_COLORS):
-        vol.All(cv.ensure_list, vol.Length(min=1, max=16),
-                [vol.All(vol.ExactSequence((cv.byte, cv.byte, cv.byte)),
-                         vol.Coerce(tuple))]),
-    vol.Optional(CONF_SPEED_PCT, default=50):
-        vol.All(vol.Range(min=0, max=100), vol.Coerce(int)),
-    vol.Optional(CONF_TRANSITION, default=TRANSITION_GRADUAL):
-        vol.All(cv.string, vol.In(
-            [TRANSITION_GRADUAL, TRANSITION_JUMP, TRANSITION_STROBE])),
-})
+EFFECT_CUSTOM: Final = "custom"
 
-DEVICE_SCHEMA = vol.Schema({
-    vol.Optional(CONF_NAME): cv.string,
-    vol.Optional(ATTR_MODE, default=MODE_RGBW):
-        vol.All(cv.string, vol.In([MODE_RGBW, MODE_RGB, MODE_WHITE])),
-    vol.Optional(CONF_PROTOCOL):
-        vol.All(cv.string, vol.In(['ledenet'])),
-    vol.Optional(CONF_CUSTOM_EFFECT): CUSTOM_EFFECT_SCHEMA,
-})
+SERVICE_CUSTOM_EFFECT: Final = "set_custom_effect"
+SERVICE_SET_ZONES: Final = "set_zones"
+SERVICE_SET_MUSIC_MODE: Final = "set_music_mode"
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Optional(CONF_DEVICES, default={}): {cv.string: DEVICE_SCHEMA},
-    vol.Optional(CONF_AUTOMATIC_ADD, default=False):  cv.boolean,
-})
+CUSTOM_EFFECT_DICT: VolDictType = {
+    vol.Required(CONF_COLORS): vol.All(
+        cv.ensure_list,
+        vol.Length(min=1, max=16),
+        [vol.All(vol.Coerce(tuple), vol.ExactSequence((cv.byte, cv.byte, cv.byte)))],
+    ),
+    vol.Optional(CONF_SPEED_PCT, default=50): vol.All(
+        vol.Coerce(int), vol.Range(min=0, max=100)
+    ),
+    vol.Optional(CONF_TRANSITION, default=TRANSITION_GRADUAL): vol.All(
+        cv.string, vol.In([TRANSITION_GRADUAL, TRANSITION_JUMP, TRANSITION_STROBE])
+    ),
+}
+
+SET_MUSIC_MODE_DICT: VolDictType = {
+    vol.Optional(ATTR_SENSITIVITY, default=100): vol.All(
+        vol.Coerce(int), vol.Range(min=0, max=100)
+    ),
+    vol.Optional(ATTR_BRIGHTNESS, default=100): vol.All(
+        vol.Coerce(int), vol.Range(min=0, max=100)
+    ),
+    vol.Optional(ATTR_EFFECT, default=1): vol.All(
+        vol.Coerce(int), vol.Range(min=0, max=16)
+    ),
+    vol.Optional(ATTR_LIGHT_SCREEN, default=False): bool,
+    vol.Optional(ATTR_FOREGROUND_COLOR): vol.All(
+        vol.Coerce(tuple), vol.ExactSequence((cv.byte,) * 3)
+    ),
+    vol.Optional(ATTR_BACKGROUND_COLOR): vol.All(
+        vol.Coerce(tuple), vol.ExactSequence((cv.byte,) * 3)
+    ),
+}
+
+SET_ZONES_DICT: VolDictType = {
+    vol.Required(CONF_COLORS): vol.All(
+        cv.ensure_list,
+        vol.Length(min=1, max=2048),
+        [vol.All(vol.Coerce(tuple), vol.ExactSequence((cv.byte, cv.byte, cv.byte)))],
+    ),
+    vol.Optional(CONF_SPEED_PCT, default=50): vol.All(
+        vol.Coerce(int), vol.Range(min=0, max=100)
+    ),
+    vol.Optional(CONF_EFFECT, default=MultiColorEffects.STATIC.name.lower()): vol.All(
+        cv.string, vol.In([effect.name.lower() for effect in MultiColorEffects])
+    ),
+}
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: FluxLedConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     """Set up the Flux lights."""
-    import flux_led
-    lights = []
-    light_ips = []
+    coordinator = entry.runtime_data
 
-    for ipaddr, device_config in config.get(CONF_DEVICES, {}).items():
-        device = {}
-        device['name'] = device_config[CONF_NAME]
-        device['ipaddr'] = ipaddr
-        device[CONF_PROTOCOL] = device_config.get(CONF_PROTOCOL)
-        device[ATTR_MODE] = device_config[ATTR_MODE]
-        device[CONF_CUSTOM_EFFECT] = device_config.get(CONF_CUSTOM_EFFECT)
-        light = FluxLight(device)
-        lights.append(light)
-        light_ips.append(ipaddr)
+    platform = entity_platform.async_get_current_platform()
+    platform.async_register_entity_service(
+        SERVICE_CUSTOM_EFFECT,
+        CUSTOM_EFFECT_DICT,
+        "async_set_custom_effect",
+    )
+    platform.async_register_entity_service(
+        SERVICE_SET_ZONES,
+        SET_ZONES_DICT,
+        "async_set_zones",
+    )
+    platform.async_register_entity_service(
+        SERVICE_SET_MUSIC_MODE,
+        SET_MUSIC_MODE_DICT,
+        "async_set_music_mode",
+    )
+    options = entry.options
 
-    if not config.get(CONF_AUTOMATIC_ADD, False):
-        add_entities(lights, True)
-        return
+    try:
+        custom_effect_colors = ast.literal_eval(
+            options.get(CONF_CUSTOM_EFFECT_COLORS) or "[]"
+        )
+    except (ValueError, TypeError, SyntaxError, MemoryError) as ex:
+        _LOGGER.warning(
+            "Could not parse custom effect colors for %s: %s", entry.unique_id, ex
+        )
+        custom_effect_colors = []
 
-    # Find the bulbs on the LAN
-    scanner = flux_led.BulbScanner()
-    scanner.scan(timeout=10)
-    for device in scanner.getBulbInfo():
-        ipaddr = device['ipaddr']
-        if ipaddr in light_ips:
-            continue
-        device['name'] = '{} {}'.format(device['id'], ipaddr)
-        device[ATTR_MODE] = None
-        device[CONF_PROTOCOL] = None
-        device[CONF_CUSTOM_EFFECT] = None
-        light = FluxLight(device)
-        lights.append(light)
-
-    add_entities(lights, True)
+    async_add_entities(
+        [
+            FluxLight(
+                coordinator,
+                entry.unique_id or entry.entry_id,
+                list(custom_effect_colors),
+                options.get(CONF_CUSTOM_EFFECT_SPEED_PCT, DEFAULT_EFFECT_SPEED),
+                options.get(CONF_CUSTOM_EFFECT_TRANSITION, TRANSITION_GRADUAL),
+            )
+        ]
+    )
 
 
-class FluxLight(Light):
+class FluxLight(
+    FluxOnOffEntity, CoordinatorEntity[FluxLedUpdateCoordinator], LightEntity
+):
     """Representation of a Flux light."""
 
-    def __init__(self, device):
+    _attr_name = None
+
+    _attr_supported_features = LightEntityFeature.TRANSITION | LightEntityFeature.EFFECT
+
+    def __init__(
+        self,
+        coordinator: FluxLedUpdateCoordinator,
+        base_unique_id: str,
+        custom_effect_colors: list[tuple[int, int, int]],
+        custom_effect_speed_pct: int,
+        custom_effect_transition: str,
+    ) -> None:
         """Initialize the light."""
-        self._name = device['name']
-        self._ipaddr = device['ipaddr']
-        self._protocol = device[CONF_PROTOCOL]
-        self._mode = device[ATTR_MODE]
-        self._custom_effect = device[CONF_CUSTOM_EFFECT]
-        self._bulb = None
-        self._error_reported = False
-        self._color = (0, 0, 100)
-        self._white_value = 0
-
-    def _connect(self):
-        """Connect to Flux light."""
-        import flux_led
-
-        self._bulb = flux_led.WifiLedBulb(self._ipaddr, timeout=5)
-        if self._protocol:
-            self._bulb.setProtocol(self._protocol)
-
-        # After bulb object is created the status is updated. We can
-        # now set the correct mode if it was not explicitly defined.
-        if not self._mode:
-            if self._bulb.rgbwcapable:
-                self._mode = MODE_RGBW
-            else:
-                self._mode = MODE_RGB
-
-    def _disconnect(self):
-        """Disconnect from Flux light."""
-        self._bulb = None
+        super().__init__(coordinator, base_unique_id, None)
+        self._attr_min_color_temp_kelvin = self._device.min_temp
+        self._attr_max_color_temp_kelvin = self._device.max_temp
+        self._attr_supported_color_modes = _hass_color_modes(self._device)
+        custom_effects: list[str] = []
+        if custom_effect_colors:
+            custom_effects.append(EFFECT_CUSTOM)
+        self._attr_effect_list = [*self._device.effect_list, *custom_effects]
+        self._custom_effect_colors = custom_effect_colors
+        self._custom_effect_speed_pct = custom_effect_speed_pct
+        self._custom_effect_transition = custom_effect_transition
 
     @property
-    def available(self) -> bool:
-        """Return True if entity is available."""
-        return self._bulb is not None
-
-    @property
-    def name(self):
-        """Return the name of the device if any."""
-        return self._name
-
-    @property
-    def is_on(self):
-        """Return true if device is on."""
-        return self._bulb.isOn()
-
-    @property
-    def brightness(self):
+    @override
+    def brightness(self) -> int:
         """Return the brightness of this light between 0..255."""
-        if self._mode == MODE_WHITE:
-            return self._white_value
-
-        return int(self._color[2] / 100 * 255)
+        return self._device.brightness
 
     @property
-    def hs_color(self):
-        """Return the color property."""
-        return self._color[0:2]
+    @override
+    def color_temp_kelvin(self) -> int:
+        """Return the kelvin value of this light."""
+        return self._device.color_temp
 
     @property
-    def supported_features(self):
-        """Flag supported features."""
-        if self._mode == MODE_RGBW:
-            return SUPPORT_FLUX_LED | SUPPORT_WHITE_VALUE
-
-        if self._mode == MODE_WHITE:
-            return SUPPORT_BRIGHTNESS
-
-        return SUPPORT_FLUX_LED
+    @override
+    def rgb_color(self) -> tuple[int, int, int]:
+        """Return the rgb color value."""
+        return self._device.rgb_unscaled
 
     @property
-    def white_value(self):
-        """Return the white value of this light between 0..255."""
-        return self._white_value
+    @override
+    def rgbw_color(self) -> tuple[int, int, int, int]:
+        """Return the rgbw color value."""
+        return self._device.rgbw
 
     @property
-    def effect_list(self):
-        """Return the list of supported effects."""
-        if self._custom_effect:
-            return FLUX_EFFECT_LIST + [EFFECT_CUSTOM]
-
-        return FLUX_EFFECT_LIST
+    @override
+    def rgbww_color(self) -> tuple[int, int, int, int, int]:
+        """Return the rgbww aka rgbcw color value."""
+        return self._device.rgbcw
 
     @property
-    def effect(self):
+    @override
+    def color_mode(self) -> ColorMode:
+        """Return the color mode of the light."""
+        return _flux_color_mode_to_hass(
+            self._device.color_mode, self._device.color_modes
+        )
+
+    @property
+    @override
+    def effect(self) -> str | None:
         """Return the current effect."""
-        current_mode = self._bulb.raw_state[3]
+        return self._device.effect
 
-        if current_mode == EFFECT_CUSTOM_CODE:
-            return EFFECT_CUSTOM
-
-        for effect, code in EFFECT_MAP.items():
-            if current_mode == code:
-                return effect
-        return None
-
-    async def async_turn_on(self, **kwargs):
-        """Turn the specified or all lights on and wait for state."""
-        await self.hass.async_add_executor_job(partial(self._turn_on,
-                                                       **kwargs))
-        # The bulb needs a bit to tell its new values,
-        # so we wait 1 second before updating
-        await sleep(1)
-
-    def _turn_on(self, **kwargs):
+    @override
+    async def _async_turn_on(self, **kwargs: Any) -> None:
         """Turn the specified or all lights on."""
-        self._bulb.turnOn()
-
-        hs_color = kwargs.get(ATTR_HS_COLOR)
-        brightness = kwargs.get(ATTR_BRIGHTNESS)
-        effect = kwargs.get(ATTR_EFFECT)
-        white = kwargs.get(ATTR_WHITE_VALUE)
-
-        if all(item is None for item in [hs_color, brightness, effect, white]):
-            return
-
-        # handle W only mode (use brightness instead of white value)
-        if self._mode == MODE_WHITE:
-            if brightness is not None:
-                self._bulb.setWarmWhite255(brightness)
-            return
-        if effect is not None:
-            # Random color effect
-            if effect == EFFECT_RANDOM:
-                self._bulb.setRgb(random.randint(0, 255),
-                                  random.randint(0, 255),
-                                  random.randint(0, 255))
-            elif effect == EFFECT_CUSTOM:
-                if self._custom_effect:
-                    self._bulb.setCustomPattern(
-                        self._custom_effect[CONF_COLORS],
-                        self._custom_effect[CONF_SPEED_PCT],
-                        self._custom_effect[CONF_TRANSITION])
-                # Effect selection
-            elif effect in EFFECT_MAP:
-                self._bulb.setPresetPattern(EFFECT_MAP[effect], 50)
-            return
-        # Preserve current brightness on color/white level change
-        if hs_color is not None:
-            if brightness is None:
-                brightness = self.brightness
-            color = (hs_color[0], hs_color[1], brightness / 255 * 100)
-        elif brightness is not None:
-            color = (self._color[0], self._color[1],
-                     brightness / 255 * 100)
-        # handle RGBW mode
-        if self._mode == MODE_RGBW:
-            if white is None:
-                self._bulb.setRgbw(*color_util.color_hsv_to_RGB(*color))
-            else:
-                self._bulb.setRgbw(w=white)
-        # handle RGB mode
-        else:
-            self._bulb.setRgb(*color_util.color_hsv_to_RGB(*color))
-
-    def turn_off(self, **kwargs):
-        """Turn the specified or all lights off."""
-        self._bulb.turnOff()
-
-    def update(self):
-        """Synchronize state with bulb."""
-        if not self.available:
-            try:
-                self._connect()
-                self._error_reported = False
-            except socket.error:
-                self._disconnect()
-                if not self._error_reported:
-                    _LOGGER.warning("Failed to connect to bulb %s, %s",
-                                    self._ipaddr, self._name)
-                    self._error_reported = True
+        if self._device.requires_turn_on or not kwargs:
+            if not self.is_on:
+                await self._device.async_turn_on()
+            if not kwargs:
                 return
-        self._bulb.update_state(retry=2)
-        if self._mode != MODE_WHITE and self._bulb.getRgb() != (0, 0, 0):
-            color = self._bulb.getRgbw()
-            self._color = color_util.color_RGB_to_hsv(*color[0:3])
-            self._white_value = color[3]
-        elif self._mode == MODE_WHITE:
-            self._white_value = self._bulb.getRgbw()[3]
+
+        if MODE_ATTRS.intersection(kwargs):
+            await self._async_set_mode(**kwargs)
+            return
+        await self._device.async_set_brightness(self._async_brightness(**kwargs))
+
+    async def _async_set_effect(self, effect: str, brightness: int) -> None:
+        """Set an effect."""
+        # Custom effect
+        if effect == EFFECT_CUSTOM:
+            if self._custom_effect_colors:
+                await self._device.async_set_custom_pattern(
+                    self._custom_effect_colors,
+                    self._custom_effect_speed_pct,
+                    self._custom_effect_transition,
+                )
+            return
+        await self._device.async_set_effect(
+            effect,
+            self._device.speed or DEFAULT_EFFECT_SPEED,
+            _effect_brightness(brightness),
+        )
+
+    @callback
+    def _async_brightness(self, **kwargs: Any) -> int:
+        """Determine brightness from kwargs or current value."""
+        if (brightness := kwargs.get(ATTR_BRIGHTNESS)) is None:
+            brightness = self.brightness
+        # If the brightness was previously 0, the light
+        # will not turn on unless brightness is at least 1
+        #
+        # We previously had a problem with the brightness
+        # sometimes reporting as 0 when an effect was in progress,
+        # however this has since been resolved in the upstream library
+        return max(MIN_RGB_BRIGHTNESS, brightness)
+
+    async def _async_set_mode(self, **kwargs: Any) -> None:
+        """Set an effect or color mode."""
+        brightness = self._async_brightness(**kwargs)
+        # Handle switch to Effect Mode
+        if effect := kwargs.get(ATTR_EFFECT):
+            await self._async_set_effect(effect, brightness)
+            return
+        # Handle switch to CCT Color Mode
+        if color_temp_kelvin := kwargs.get(ATTR_COLOR_TEMP_KELVIN):
+            if (
+                ATTR_BRIGHTNESS not in kwargs
+                and self.color_mode in MULTI_BRIGHTNESS_COLOR_MODES
+            ):
+                # When switching to color temp from RGBWW or RGB&W mode,
+                # we do not want the overall brightness of the RGB channels
+                brightness = max(MIN_CCT_BRIGHTNESS, *self._device.rgb)
+            await self._device.async_set_white_temp(color_temp_kelvin, brightness)
+            return
+        # Handle switch to RGB Color Mode
+        if rgb := kwargs.get(ATTR_RGB_COLOR):
+            if not self._device.requires_turn_on:
+                rgb = _min_rgb_brightness(rgb)
+            red, green, blue = rgb
+            await self._device.async_set_levels(red, green, blue, brightness=brightness)
+            return
+        # Handle switch to RGBW Color Mode
+        if rgbw := kwargs.get(ATTR_RGBW_COLOR):
+            if ATTR_BRIGHTNESS in kwargs:
+                rgbw = rgbw_brightness(rgbw, brightness)
+            rgbw = _min_rgbw_brightness(rgbw, self._device.rgbw)
+            await self._device.async_set_levels(*rgbw)
+            return
+        # Handle switch to RGBWW Color Mode
+        if rgbcw := kwargs.get(ATTR_RGBWW_COLOR):
+            if ATTR_BRIGHTNESS in kwargs:
+                rgbcw = rgbcw_brightness(kwargs[ATTR_RGBWW_COLOR], brightness)
+            rgbwc = rgbcw_to_rgbwc(rgbcw)
+            rgbwc = _min_rgbwc_brightness(rgbwc, self._device.rgbww)
+            await self._device.async_set_levels(*rgbwc)
+            return
+        if (white := kwargs.get(ATTR_WHITE)) is not None:
+            await self._device.async_set_levels(w=white)
+            return
+
+    async def async_set_custom_effect(
+        self, colors: list[tuple[int, int, int]], speed_pct: int, transition: str
+    ) -> None:
+        """Set a custom effect on the bulb."""
+        await self._device.async_set_custom_pattern(
+            colors,
+            speed_pct,
+            transition,
+        )
+
+    async def async_set_zones(
+        self, colors: list[tuple[int, int, int]], speed_pct: int, effect: str
+    ) -> None:
+        """Set a colors for zones."""
+        await self._device.async_set_zones(
+            colors,
+            speed_pct,
+            _str_to_multi_color_effect(effect),
+        )
+
+    async def async_set_music_mode(
+        self,
+        sensitivity: int,
+        brightness: int,
+        effect: int,
+        light_screen: bool,
+        foreground_color: tuple[int, int, int] | None = None,
+        background_color: tuple[int, int, int] | None = None,
+    ) -> None:
+        """Configure music mode."""
+        await self._async_ensure_device_on()
+        await self._device.async_set_music_mode(
+            sensitivity=sensitivity,
+            brightness=brightness,
+            mode=MusicMode.LIGHT_SCREEN.value if light_screen else None,
+            effect=effect,
+            foreground_color=foreground_color,
+            background_color=background_color,
+        )

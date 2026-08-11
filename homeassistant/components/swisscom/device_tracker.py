@@ -1,94 +1,122 @@
-"""Support for Swisscom routers (Internet-Box)."""
-import logging
+"""Device tracker for the Swisscom Internet-Box."""
 
-from aiohttp.hdrs import CONTENT_TYPE
-import requests
+from typing import override
+
 import voluptuous as vol
 
 from homeassistant.components.device_tracker import (
-    DOMAIN, PLATFORM_SCHEMA, DeviceScanner)
+    PLATFORM_SCHEMA as DEVICE_TRACKER_PLATFORM_SCHEMA,
+    AsyncSeeCallback,
+    ScannerEntity,
+)
 from homeassistant.const import CONF_HOST
-import homeassistant.helpers.config_validation as cv
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_validation as cv, issue_registry as ir
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-_LOGGER = logging.getLogger(__name__)
+from .const import DEFAULT_HOST, DOMAIN
+from .coordinator import SwisscomConfigEntry, SwisscomDataUpdateCoordinator
 
-DEFAULT_IP = '192.168.1.1'
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Optional(CONF_HOST, default=DEFAULT_IP): cv.string
-})
-
-
-def get_scanner(hass, config):
-    """Return the Swisscom device scanner."""
-    scanner = SwisscomDeviceScanner(config[DOMAIN])
-
-    return scanner if scanner.success_init else None
+PLATFORM_SCHEMA = DEVICE_TRACKER_PLATFORM_SCHEMA.extend(
+    {vol.Optional(CONF_HOST, default=DEFAULT_HOST): cv.string}
+)
 
 
-class SwisscomDeviceScanner(DeviceScanner):
-    """This class queries a router running Swisscom Internet-Box firmware."""
+async def async_setup_scanner(
+    hass: HomeAssistant,
+    config: ConfigType,
+    async_see: AsyncSeeCallback,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> bool:
+    """Inform users that the YAML configuration is no longer supported."""
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        "deprecated_yaml_import_issue_credentials_required",
+        breaks_in_ha_version="2027.1.0",
+        is_fixable=False,
+        is_persistent=False,
+        issue_domain=DOMAIN,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="deprecated_yaml_import_issue_credentials_required",
+        translation_placeholders={
+            "domain": DOMAIN,
+            "integration_title": "Swisscom Internet-Box",
+            "host": config[CONF_HOST],
+        },
+    )
+    return False
 
-    def __init__(self, config):
-        """Initialize the scanner."""
-        self.host = config[CONF_HOST]
-        self.last_results = {}
 
-        # Test the router is accessible.
-        data = self.get_swisscom_data()
-        self.success_init = data is not None
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: SwisscomConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up device tracker entities for the Swisscom Internet-Box."""
+    coordinator = entry.runtime_data
+    tracked: set[str] = set()
 
-    def scan_devices(self):
-        """Scan for new devices and return a list with found device IDs."""
-        self._update_info()
-        return [client['mac'] for client in self.last_results]
+    @callback
+    def _add_new_entities() -> None:
+        new_keys = [key for key in coordinator.data if key not in tracked]
+        if new_keys:
+            tracked.update(new_keys)
+            async_add_entities(
+                SwisscomScannerEntity(coordinator, key) for key in new_keys
+            )
 
-    def get_device_name(self, device):
-        """Return the name of the given device or None if we don't know."""
-        if not self.last_results:
-            return None
-        for client in self.last_results:
-            if client['mac'] == device:
-                return client['host']
-        return None
+    _add_new_entities()
+    entry.async_on_unload(coordinator.async_add_listener(_add_new_entities))
 
-    def _update_info(self):
-        """Ensure the information from the Swisscom router is up to date.
 
-        Return boolean if scanning successful.
-        """
-        if not self.success_init:
-            return False
+class SwisscomScannerEntity(
+    CoordinatorEntity[SwisscomDataUpdateCoordinator], ScannerEntity
+):
+    """A device tracked by the Swisscom Internet-Box."""
 
-        _LOGGER.info("Loading data from Swisscom Internet Box")
-        data = self.get_swisscom_data()
-        if not data:
-            return False
+    def __init__(self, coordinator: SwisscomDataUpdateCoordinator, key: str) -> None:
+        """Initialize the scanner entity."""
+        super().__init__(coordinator)
+        self._key = key
+        self._attr_unique_id = key
 
-        active_clients = [client for client in data.values() if
-                          client['status']]
-        self.last_results = active_clients
-        return True
+    @property
+    def _device(self):
+        return self.coordinator.data.get(self._key)
 
-    def get_swisscom_data(self):
-        """Retrieve data from Swisscom and return parsed result."""
-        url = 'http://{}/ws'.format(self.host)
-        headers = {CONTENT_TYPE: 'application/x-sah-ws-4-call+json'}
-        data = """
-        {"service":"Devices", "method":"get",
-        "parameters":{"expression":"lan and not self"}}"""
+    @property
+    @override
+    def is_connected(self) -> bool:
+        """Return whether the device is currently connected to the LAN."""
+        device = self._device
+        return bool(device and device.active)
 
-        request = requests.post(url, headers=headers, data=data, timeout=10)
+    @property
+    @override
+    def mac_address(self) -> str:
+        """Return the MAC address of the device."""
+        device = self._device
+        return device.phys_address if device else self._key
 
-        devices = {}
-        for device in request.json()['status']:
-            try:
-                devices[device['Key']] = {
-                    'ip': device['IPAddress'],
-                    'mac': device['PhysAddress'],
-                    'host': device['Name'],
-                    'status': device['Active']
-                    }
-            except (KeyError, requests.exceptions.RequestException):
-                pass
-        return devices
+    @property
+    @override
+    def hostname(self) -> str | None:
+        """Return the hostname of the device."""
+        device = self._device
+        return device.name if device else None
+
+    @property
+    @override
+    def ip_address(self) -> str | None:
+        """Return the IP address of the device."""
+        device = self._device
+        return device.ip_address if device else None
+
+    @property
+    @override
+    def name(self) -> str | None:
+        """Return the friendly name of the device."""
+        return self.hostname

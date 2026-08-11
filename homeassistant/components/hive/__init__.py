@@ -1,77 +1,111 @@
-"""Support for the Hive devices."""
+"""Support for the Hive devices and services."""
+
+from collections.abc import Awaitable, Callable, Coroutine
+from functools import wraps
 import logging
+from typing import Any, Concatenate
 
-from pyhiveapi import Pyhiveapi
-import voluptuous as vol
+from aiohttp.web_exceptions import HTTPException
+from apyhiveapi import Auth, Hive
+from apyhiveapi.helper.hive_exceptions import HiveReauthRequired
 
-from homeassistant.const import (
-    CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME)
-import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.discovery import load_platform
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_SCAN_INTERVAL
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import aiohttp_client, device_registry as dr
+from homeassistant.helpers.dispatcher import async_dispatcher_send
+
+from .const import DOMAIN, PLATFORM_LOOKUP, PLATFORMS
+from .entity import HiveEntity
 
 _LOGGER = logging.getLogger(__name__)
 
-DOMAIN = 'hive'
-DATA_HIVE = 'data_hive'
-DEVICETYPES = {
-    'binary_sensor': 'device_list_binary_sensor',
-    'climate': 'device_list_climate',
-    'light': 'device_list_light',
-    'switch': 'device_list_plug',
-    'sensor': 'device_list_sensor',
-}
-
-CONFIG_SCHEMA = vol.Schema({
-    DOMAIN: vol.Schema({
-        vol.Required(CONF_PASSWORD): cv.string,
-        vol.Required(CONF_USERNAME): cv.string,
-        vol.Optional(CONF_SCAN_INTERVAL, default=2): cv.positive_int,
-    })
-}, extra=vol.ALLOW_EXTRA)
+type HiveConfigEntry = ConfigEntry[Hive]
 
 
-class HiveSession:
-    """Initiate Hive Session Class."""
+async def async_setup_entry(hass: HomeAssistant, entry: HiveConfigEntry) -> bool:
+    """Set up Hive from a config entry."""
+    web_session = aiohttp_client.async_get_clientsession(hass)
+    hive_config = dict(entry.data)
+    hive = Hive(web_session)
 
-    entities = []
-    core = None
-    heating = None
-    hotwater = None
-    light = None
-    sensor = None
-    switch = None
-    weather = None
-    attributes = None
+    hive_config["options"] = {}
+    hive_config["options"].update(
+        {CONF_SCAN_INTERVAL: dict(entry.options).get(CONF_SCAN_INTERVAL, 120)}
+    )
+    entry.runtime_data = hive
 
+    try:
+        devices = await hive.session.startSession(hive_config)
+    except HTTPException as error:
+        _LOGGER.error("Could not connect to the internet: %s", error)
+        raise ConfigEntryNotReady from error
+    except HiveReauthRequired as err:
+        raise ConfigEntryAuthFailed from err
 
-def setup(hass, config):
-    """Set up the Hive Component."""
-    session = HiveSession()
-    session.core = Pyhiveapi()
+    hub_data = devices["parent"][0]
+    connections: set[tuple[str, str]] = set()
+    if mac := hub_data.get("macAddress"):
+        connections.add((dr.CONNECTION_NETWORK_MAC, mac))
 
-    username = config[DOMAIN][CONF_USERNAME]
-    password = config[DOMAIN][CONF_PASSWORD]
-    update_interval = config[DOMAIN][CONF_SCAN_INTERVAL]
+    device_registry = dr.async_get(hass)
+    hub_device = device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, hub_data["device_id"])},
+        connections=connections,
+        name=hub_data["hiveName"],
+        model=hub_data["deviceData"]["model"],
+        sw_version=hub_data["deviceData"]["version"],
+        manufacturer=hub_data["deviceData"]["manufacturer"],
+    )
+    if hub_device.via_device_id is not None:
+        # Older versions linked the hub's own diagnostic sensor to the hub itself;
+        # clear the stale self-reference since async_get_or_create leaves
+        # via_device_id untouched when it's not passed.
+        device_registry.async_update_device(hub_device.id, via_device_id=None)
 
-    devicelist = session.core.initialise_api(
-        username, password, update_interval)
+    await hass.config_entries.async_forward_entry_setups(
+        entry,
+        [
+            ha_type
+            for ha_type, hive_type in PLATFORM_LOOKUP.items()
+            if devices.get(hive_type)
+        ],
+    )
 
-    if devicelist is None:
-        _LOGGER.error("Hive API initialization failed")
-        return False
-
-    session.sensor = Pyhiveapi.Sensor()
-    session.heating = Pyhiveapi.Heating()
-    session.hotwater = Pyhiveapi.Hotwater()
-    session.light = Pyhiveapi.Light()
-    session.switch = Pyhiveapi.Switch()
-    session.weather = Pyhiveapi.Weather()
-    session.attributes = Pyhiveapi.Attributes()
-    hass.data[DATA_HIVE] = session
-
-    for ha_type, hive_type in DEVICETYPES.items():
-        for key, devices in devicelist.items():
-            if key == hive_type:
-                for hivedevice in devices:
-                    load_platform(hass, ha_type, DOMAIN, hivedevice, config)
     return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: HiveConfigEntry) -> bool:
+    """Unload a config entry."""
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: HiveConfigEntry) -> None:
+    """Remove a config entry."""
+    hive = Auth(entry.data["username"], entry.data["password"])
+    await hive.forget_device(
+        entry.data["tokens"]["AuthenticationResult"]["AccessToken"],
+        entry.data["device_data"][1],
+    )
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, config_entry: HiveConfigEntry, device_entry: dr.DeviceEntry
+) -> bool:
+    """Remove a config entry from a device."""
+    return True
+
+
+def refresh_system[_HiveEntityT: HiveEntity, **_P](
+    func: Callable[Concatenate[_HiveEntityT, _P], Awaitable[Any]],
+) -> Callable[Concatenate[_HiveEntityT, _P], Coroutine[Any, Any, None]]:
+    """Force update all entities after state change."""
+
+    @wraps(func)
+    async def wrapper(self: _HiveEntityT, *args: _P.args, **kwargs: _P.kwargs) -> None:
+        await func(self, *args, **kwargs)
+        async_dispatcher_send(self.hass, DOMAIN)
+
+    return wrapper

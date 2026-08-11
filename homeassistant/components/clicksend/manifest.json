@@ -1,8 +1,8 @@
 {
   "domain": "clicksend",
-  "name": "Clicksend",
-  "documentation": "https://www.home-assistant.io/components/clicksend",
-  "requirements": [],
-  "dependencies": [],
-  "codeowners": []
+  "name": "ClickSend SMS",
+  "codeowners": [],
+  "documentation": "https://www.home-assistant.io/integrations/clicksend",
+  "iot_class": "cloud_push",
+  "quality_scale": "legacy"
 }

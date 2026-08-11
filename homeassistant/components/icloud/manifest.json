@@ -1,10 +1,12 @@
 {
   "domain": "icloud",
-  "name": "Icloud",
-  "documentation": "https://www.home-assistant.io/components/icloud",
-  "requirements": [
-    "pyicloud==0.9.1"
-  ],
-  "dependencies": ["configurator"],
-  "codeowners": []
+  "name": "Apple iCloud",
+  "codeowners": ["@Quentame", "@nzapponi"],
+  "config_flow": true,
+  "dependencies": ["http"],
+  "documentation": "https://www.home-assistant.io/integrations/icloud",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "loggers": ["keyrings.alt", "pyicloud"],
+  "requirements": ["pyicloud==2.6.5"]
 }

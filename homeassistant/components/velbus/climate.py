@@ -1,80 +1,106 @@
 """Support for Velbus thermostat."""
-import logging
 
-from homeassistant.components.climate import ClimateDevice
-from homeassistant.components.climate.const import (
-    HVAC_MODE_HEAT, SUPPORT_TARGET_TEMPERATURE)
-from homeassistant.const import ATTR_TEMPERATURE, TEMP_CELSIUS, TEMP_FAHRENHEIT
+from typing import Any, override
 
-from . import DOMAIN as VELBUS_DOMAIN, VelbusEntity
+from velbusaio.channels import Temperature as VelbusTemp
 
-_LOGGER = logging.getLogger(__name__)
+from homeassistant.components.climate import (
+    ClimateEntity,
+    ClimateEntityFeature,
+    HVACMode,
+)
+from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from . import VelbusConfigEntry
+from .const import DOMAIN, PRESET_MODES
+from .entity import VelbusEntity, api_call
 
-async def async_setup_platform(
-        hass, config, async_add_entities, discovery_info=None):
-    """Set up the Velbus thermostat platform."""
-    if discovery_info is None:
-        return
-
-    sensors = []
-    for sensor in discovery_info:
-        module = hass.data[VELBUS_DOMAIN].get_module(sensor[0])
-        channel = sensor[1]
-        sensors.append(VelbusClimate(module, channel))
-
-    async_add_entities(sensors)
+PARALLEL_UPDATES = 0
 
 
-class VelbusClimate(VelbusEntity, ClimateDevice):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: VelbusConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up Velbus switch based on config_entry."""
+    await entry.runtime_data.scan_task
+    async_add_entities(
+        VelbusClimate(channel)
+        for channel in entry.runtime_data.controller.get_all_climate()
+    )
+
+
+class VelbusClimate(VelbusEntity, ClimateEntity):
     """Representation of a Velbus thermostat."""
 
-    @property
-    def supported_features(self):
-        """Return the list off supported features."""
-        return SUPPORT_TARGET_TEMPERATURE
+    _channel: VelbusTemp
+    _attr_supported_features = (
+        ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+    )
+    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_hvac_modes = [HVACMode.HEAT, HVACMode.COOL]
+    _attr_preset_modes = list(PRESET_MODES)
 
     @property
-    def temperature_unit(self):
-        """Return the unit this state is expressed in."""
-        if self._module.get_unit(self._channel) == '°C':
-            return TEMP_CELSIUS
-        return TEMP_FAHRENHEIT
-
-    @property
-    def current_temperature(self):
-        """Return the current temperature."""
-        return self._module.get_state(self._channel)
-
-    @property
-    def hvac_mode(self):
-        """Return hvac operation ie. heat, cool mode.
-
-        Need to be one of HVAC_MODE_*.
-        """
-        return HVAC_MODE_HEAT
-
-    @property
-    def hvac_modes(self):
-        """Return the list of available hvac operation modes.
-
-        Need to be a subset of HVAC_MODES.
-        """
-        return [HVAC_MODE_HEAT]
-
-    @property
-    def target_temperature(self):
+    @override
+    def target_temperature(self) -> float | None:
         """Return the temperature we try to reach."""
-        return self._module.get_climate_target()
+        return self._channel.get_climate_target()
 
-    def set_temperature(self, **kwargs):
+    @property
+    @override
+    def preset_mode(self) -> str | None:
+        """Return the current Preset for this channel."""
+        return next(
+            (
+                key
+                for key, val in PRESET_MODES.items()
+                if val == self._channel.get_climate_preset()
+            ),
+            None,
+        )
+
+    @property
+    @override
+    def current_temperature(self) -> float | None:
+        """Return the current temperature."""
+        return self._channel.get_state()
+
+    @property
+    @override
+    def hvac_mode(self) -> HVACMode:
+        """Return the current hvac mode based on cool_mode message."""
+        return HVACMode.COOL if self._channel.get_cool_mode() else HVACMode.HEAT
+
+    @api_call
+    @override
+    async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperatures."""
-        temp = kwargs.get(ATTR_TEMPERATURE)
-        if temp is None:
+        if (temp := kwargs.get(ATTR_TEMPERATURE)) is None:
             return
-        self._module.set_temp(temp)
-        self.schedule_update_ha_state()
+        await self._channel.set_temp(temp)
+        self.async_write_ha_state()
 
-    def set_hvac_mode(self, hvac_mode):
-        """Set new target hvac mode."""
-        pass
+    @api_call
+    @override
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        """Set the new preset mode."""
+        await self._channel.set_preset(PRESET_MODES[preset_mode])
+        self.async_write_ha_state()
+
+    @api_call
+    @override
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        """Set the new hvac mode."""
+        if hvac_mode not in self._attr_hvac_modes:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="invalid_hvac_mode",
+                translation_placeholders={"hvac_mode": str(hvac_mode)},
+            )
+        await self._channel.set_mode(hvac_mode)
+        self.async_write_ha_state()

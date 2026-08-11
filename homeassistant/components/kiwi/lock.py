@@ -1,103 +1,125 @@
 """Support for the KIWI.KI lock platform."""
-import logging
 
+import logging
+from typing import Any, override
+
+from kiwiki import KiwiClient, KiwiException
 import voluptuous as vol
 
-import homeassistant.helpers.config_validation as cv
-from homeassistant.components.lock import (LockDevice, PLATFORM_SCHEMA)
+from homeassistant.components.lock import (
+    PLATFORM_SCHEMA as LOCK_PLATFORM_SCHEMA,
+    LockEntity,
+    LockState,
+)
 from homeassistant.const import (
-    CONF_PASSWORD, CONF_USERNAME, ATTR_ID, ATTR_LONGITUDE, ATTR_LATITUDE,
-    STATE_LOCKED, STATE_UNLOCKED)
+    ATTR_ID,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+    EntityStateAttribute,
+)
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
-from homeassistant.core import callback
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 _LOGGER = logging.getLogger(__name__)
 
-ATTR_TYPE = 'hardware_type'
-ATTR_PERMISSION = 'permission'
-ATTR_CAN_INVITE = 'can_invite_others'
+ATTR_TYPE = "hardware_type"
+ATTR_PERMISSION = "permission"
+ATTR_CAN_INVITE = "can_invite_others"
 
 UNLOCK_MAINTAIN_TIME = 5
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_USERNAME): cv.string,
-    vol.Required(CONF_PASSWORD): cv.string
-})
+PLATFORM_SCHEMA = LOCK_PLATFORM_SCHEMA.extend(
+    {vol.Required(CONF_USERNAME): cv.string, vol.Required(CONF_PASSWORD): cv.string}
+)
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
+def setup_platform(
+    hass: HomeAssistant,
+    config: ConfigType,
+    add_entities: AddEntitiesCallback,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> None:
     """Set up the KIWI lock platform."""
-    from kiwiki import KiwiClient, KiwiException
+
     try:
         kiwi = KiwiClient(config[CONF_USERNAME], config[CONF_PASSWORD])
     except KiwiException as exc:
         _LOGGER.error(exc)
         return
-    available_locks = kiwi.get_locks()
-    if not available_locks:
+    if not (available_locks := kiwi.get_locks()):
         # No locks found; abort setup routine.
-        _LOGGER.info("No KIWI locks found in your account.")
+        _LOGGER.debug("No KIWI locks found in your account")
         return
     add_entities([KiwiLock(lock, kiwi) for lock in available_locks], True)
 
 
-class KiwiLock(LockDevice):
+class KiwiLock(LockEntity):
     """Representation of a Kiwi lock."""
 
     def __init__(self, kiwi_lock, client):
         """Initialize the lock."""
         self._sensor = kiwi_lock
         self._client = client
-        self.lock_id = kiwi_lock['sensor_id']
-        self._state = STATE_LOCKED
+        self.lock_id = kiwi_lock["sensor_id"]
+        self._state = LockState.LOCKED
 
-        address = kiwi_lock.get('address')
-        address.update({
-            ATTR_LATITUDE: address.pop('lat', None),
-            ATTR_LONGITUDE: address.pop('lng', None)
-        })
+        address = kiwi_lock.get("address")
+        latitude = address.pop("lat", None)
+        longitude = address.pop("lng", None)
 
         self._device_attrs = {
             ATTR_ID: self.lock_id,
-            ATTR_TYPE: kiwi_lock.get('hardware_type'),
-            ATTR_PERMISSION: kiwi_lock.get('highest_permission'),
-            ATTR_CAN_INVITE: kiwi_lock.get('can_invite'),
-            **address
+            ATTR_TYPE: kiwi_lock.get("hardware_type"),
+            ATTR_PERMISSION: kiwi_lock.get("highest_permission"),
+            ATTR_CAN_INVITE: kiwi_lock.get("can_invite"),
+            **address,
+            EntityStateAttribute.LATITUDE: latitude,
+            EntityStateAttribute.LONGITUDE: longitude,
         }
 
     @property
-    def name(self):
+    @override
+    def name(self) -> str | None:
         """Return the name of the lock."""
-        name = self._sensor.get('name')
-        specifier = self._sensor['address'].get('specifier')
+        name = self._sensor.get("name")
+        specifier = self._sensor["address"].get("specifier")
         return name or specifier
 
     @property
-    def is_locked(self):
+    @override
+    def is_locked(self) -> bool:
         """Return true if lock is locked."""
-        return self._state == STATE_LOCKED
+        return self._state == LockState.LOCKED
 
     @property
-    def device_state_attributes(self):
+    @override
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Return the device specific state attributes."""
         return self._device_attrs
 
     @callback
     def clear_unlock_state(self, _):
         """Clear unlock state automatically."""
-        self._state = STATE_LOCKED
-        self.async_schedule_update_ha_state()
+        self._state = LockState.LOCKED
+        self.async_write_ha_state()
 
-    def unlock(self, **kwargs):
+    @override
+    def unlock(self, **kwargs: Any) -> None:
         """Unlock the device."""
-        from kiwiki import KiwiException
+
         try:
             self._client.open_door(self.lock_id)
+        # pylint: disable-next=home-assistant-action-swallowed-exception
         except KiwiException:
-            _LOGGER.error("failed to open door")
+            _LOGGER.error("Failed to open door")
         else:
-            self._state = STATE_UNLOCKED
+            self._state = LockState.UNLOCKED
             self.hass.add_job(
-                async_call_later, self.hass, UNLOCK_MAINTAIN_TIME,
-                self.clear_unlock_state
+                async_call_later,
+                self.hass,
+                UNLOCK_MAINTAIN_TIME,
+                self.clear_unlock_state,
             )

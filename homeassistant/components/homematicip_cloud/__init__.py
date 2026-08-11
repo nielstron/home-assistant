@@ -1,220 +1,230 @@
 """Support for HomematicIP Cloud devices."""
+
 import logging
 
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_NAME
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr
-import homeassistant.helpers.config_validation as cv
+from homeassistant.const import CONF_NAME, EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.helpers.typing import ConfigType
 
-from .config_flow import configured_haps
 from .const import (
-    CONF_ACCESSPOINT, CONF_AUTHTOKEN, DOMAIN, HMIPC_AUTHTOKEN, HMIPC_HAPID,
-    HMIPC_NAME)
-from .device import HomematicipGenericDevice  # noqa: F401
-from .hap import HomematicipAuth, HomematicipHAP  # noqa: F401
+    CONF_ACCESSPOINT,
+    CONF_AUTHTOKEN,
+    DOMAIN,
+    HMIPC_AUTHTOKEN,
+    HMIPC_HAPID,
+    HMIPC_NAME,
+)
+from .hap import HomematicIPConfigEntry, HomematicipHAP
+from .migration import _match_legacy_class_name, _migrate_unique_id
+from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
 
-ATTR_DURATION = 'duration'
-ATTR_ENDTIME = 'endtime'
-ATTR_TEMPERATURE = 'temperature'
-ATTR_ACCESSPOINT_ID = 'accesspoint_id'
-
-SERVICE_ACTIVATE_ECO_MODE_WITH_DURATION = 'activate_eco_mode_with_duration'
-SERVICE_ACTIVATE_ECO_MODE_WITH_PERIOD = 'activate_eco_mode_with_period'
-SERVICE_ACTIVATE_VACATION = 'activate_vacation'
-SERVICE_DEACTIVATE_ECO_MODE = 'deactivate_eco_mode'
-SERVICE_DEACTIVATE_VACATION = 'deactivate_vacation'
-
-CONFIG_SCHEMA = vol.Schema({
-    vol.Optional(DOMAIN, default=[]): vol.All(cv.ensure_list, [vol.Schema({
-        vol.Optional(CONF_NAME, default=''): vol.Any(cv.string),
-        vol.Required(CONF_ACCESSPOINT): cv.string,
-        vol.Required(CONF_AUTHTOKEN): cv.string,
-    })]),
-}, extra=vol.ALLOW_EXTRA)
-
-SCHEMA_ACTIVATE_ECO_MODE_WITH_DURATION = vol.Schema({
-    vol.Required(ATTR_DURATION): cv.positive_int,
-    vol.Optional(ATTR_ACCESSPOINT_ID):
-        vol.All(str, vol.Length(min=24, max=24)),
-})
-
-SCHEMA_ACTIVATE_ECO_MODE_WITH_PERIOD = vol.Schema({
-    vol.Required(ATTR_ENDTIME): cv.datetime,
-    vol.Optional(ATTR_ACCESSPOINT_ID):
-        vol.All(str, vol.Length(min=24, max=24)),
-})
-
-SCHEMA_ACTIVATE_VACATION = vol.Schema({
-    vol.Required(ATTR_ENDTIME): cv.datetime,
-    vol.Required(ATTR_TEMPERATURE, default=18.0):
-        vol.All(vol.Coerce(float), vol.Range(min=0, max=55)),
-    vol.Optional(ATTR_ACCESSPOINT_ID):
-        vol.All(str, vol.Length(min=24, max=24)),
-})
-
-SCHEMA_DEACTIVATE_ECO_MODE = vol.Schema({
-    vol.Optional(ATTR_ACCESSPOINT_ID):
-        vol.All(str, vol.Length(min=24, max=24)),
-})
-
-SCHEMA_DEACTIVATE_VACATION = vol.Schema({
-    vol.Optional(ATTR_ACCESSPOINT_ID):
-        vol.All(str, vol.Length(min=24, max=24)),
-})
+CONFIG_SCHEMA = vol.Schema(
+    {
+        vol.Optional(DOMAIN, default=[]): vol.All(
+            cv.ensure_list,
+            [
+                vol.Schema(
+                    {
+                        vol.Optional(CONF_NAME, default=""): vol.Any(cv.string),
+                        vol.Required(CONF_ACCESSPOINT): cv.string,
+                        vol.Required(CONF_AUTHTOKEN): cv.string,
+                    }
+                )
+            ],
+        )
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up the HomematicIP Cloud component."""
-    hass.data[DOMAIN] = {}
-
+    """Set up the HomematicIP Cloud integration."""
     accesspoints = config.get(DOMAIN, [])
 
     for conf in accesspoints:
-        if conf[CONF_ACCESSPOINT] not in configured_haps(hass):
-            hass.async_add_job(hass.config_entries.flow.async_init(
-                DOMAIN, context={'source': config_entries.SOURCE_IMPORT},
-                data={
-                    HMIPC_HAPID: conf[CONF_ACCESSPOINT],
-                    HMIPC_AUTHTOKEN: conf[CONF_AUTHTOKEN],
-                    HMIPC_NAME: conf[CONF_NAME],
-                }
-            ))
+        if conf[CONF_ACCESSPOINT] not in {
+            entry.data[HMIPC_HAPID]
+            for entry in hass.config_entries.async_entries(DOMAIN)
+        }:
+            hass.async_create_task(
+                hass.config_entries.flow.async_init(
+                    DOMAIN,
+                    context={"source": config_entries.SOURCE_IMPORT},
+                    data={
+                        HMIPC_HAPID: conf[CONF_ACCESSPOINT],
+                        HMIPC_AUTHTOKEN: conf[CONF_AUTHTOKEN],
+                        HMIPC_NAME: conf[CONF_NAME],
+                    },
+                )
+            )
 
-    async def _async_activate_eco_mode_with_duration(service):
-        """Service to activate eco mode with duration."""
-        duration = service.data[ATTR_DURATION]
-        hapid = service.data.get(ATTR_ACCESSPOINT_ID)
-
-        if hapid:
-            home = _get_home(hapid)
-            if home:
-                await home.activate_absence_with_duration(duration)
-        else:
-            for hapid in hass.data[DOMAIN]:
-                home = hass.data[DOMAIN][hapid].home
-                await home.activate_absence_with_duration(duration)
-
-    hass.services.async_register(
-        DOMAIN, SERVICE_ACTIVATE_ECO_MODE_WITH_DURATION,
-        _async_activate_eco_mode_with_duration,
-        schema=SCHEMA_ACTIVATE_ECO_MODE_WITH_DURATION)
-
-    async def _async_activate_eco_mode_with_period(service):
-        """Service to activate eco mode with period."""
-        endtime = service.data[ATTR_ENDTIME]
-        hapid = service.data.get(ATTR_ACCESSPOINT_ID)
-
-        if hapid:
-            home = _get_home(hapid)
-            if home:
-                await home.activate_absence_with_period(endtime)
-        else:
-            for hapid in hass.data[DOMAIN]:
-                home = hass.data[DOMAIN][hapid].home
-                await home.activate_absence_with_period(endtime)
-
-    hass.services.async_register(
-        DOMAIN, SERVICE_ACTIVATE_ECO_MODE_WITH_PERIOD,
-        _async_activate_eco_mode_with_period,
-        schema=SCHEMA_ACTIVATE_ECO_MODE_WITH_PERIOD)
-
-    async def _async_activate_vacation(service):
-        """Service to activate vacation."""
-        endtime = service.data[ATTR_ENDTIME]
-        temperature = service.data[ATTR_TEMPERATURE]
-        hapid = service.data.get(ATTR_ACCESSPOINT_ID)
-
-        if hapid:
-            home = _get_home(hapid)
-            if home:
-                await home.activate_vacation(endtime, temperature)
-        else:
-            for hapid in hass.data[DOMAIN]:
-                home = hass.data[DOMAIN][hapid].home
-                await home.activate_vacation(endtime, temperature)
-
-    hass.services.async_register(
-        DOMAIN, SERVICE_ACTIVATE_VACATION, _async_activate_vacation,
-        schema=SCHEMA_ACTIVATE_VACATION)
-
-    async def _async_deactivate_eco_mode(service):
-        """Service to deactivate eco mode."""
-        hapid = service.data.get(ATTR_ACCESSPOINT_ID)
-
-        if hapid:
-            home = _get_home(hapid)
-            if home:
-                await home.deactivate_absence()
-        else:
-            for hapid in hass.data[DOMAIN]:
-                home = hass.data[DOMAIN][hapid].home
-                await home.deactivate_absence()
-
-    hass.services.async_register(
-        DOMAIN, SERVICE_DEACTIVATE_ECO_MODE, _async_deactivate_eco_mode,
-        schema=SCHEMA_DEACTIVATE_ECO_MODE)
-
-    async def _async_deactivate_vacation(service):
-        """Service to deactivate vacation."""
-        hapid = service.data.get(ATTR_ACCESSPOINT_ID)
-
-        if hapid:
-            home = _get_home(hapid)
-            if home:
-                await home.deactivate_vacation()
-        else:
-            for hapid in hass.data[DOMAIN]:
-                home = hass.data[DOMAIN][hapid].home
-                await home.deactivate_vacation()
-
-    hass.services.async_register(
-        DOMAIN, SERVICE_DEACTIVATE_VACATION, _async_deactivate_vacation,
-        schema=SCHEMA_DEACTIVATE_VACATION)
-
-    def _get_home(hapid: str):
-        """Return a HmIP home."""
-        hap = hass.data[DOMAIN][hapid]
-        if hap:
-            return hap.home
-        return None
+    async_setup_services(hass)
 
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: HomematicIPConfigEntry) -> bool:
     """Set up an access point from a config entry."""
-    hap = HomematicipHAP(hass, entry)
-    hapid = entry.data[HMIPC_HAPID].replace('-', '').upper()
-    hass.data[DOMAIN][hapid] = hap
 
+    # 0.104 introduced config entry unique id, this makes upgrading possible
+    if entry.unique_id is None:
+        new_data = dict(entry.data)
+
+        hass.config_entries.async_update_entry(
+            entry, unique_id=new_data[HMIPC_HAPID], data=new_data
+        )
+
+    hap = HomematicipHAP(hass, entry)
+
+    entry.runtime_data = hap
     if not await hap.async_setup():
         return False
 
-    # Register hap as device in registry.
-    device_registry = await dr.async_get_registry(hass)
-    home = hap.home
-    # Add the HAP name from configuration if set.
-    hapname = home.label \
-        if not home.name else "{} {}".format(home.label, home.name)
-    device_registry.async_get_or_create(
-        config_entry_id=home.id,
-        identifiers={(DOMAIN, home.id)},
-        manufacturer='eQ-3',
-        name=hapname,
-        model=home.modelType,
-        sw_version=home.currentAPVersion,
+    # Register on HA stop event to gracefully shutdown HomematicIP Cloud connection
+    hap.reset_connection_listener = hass.bus.async_listen_once(
+        EVENT_HOMEASSISTANT_STOP, hap.shutdown
     )
+
     return True
 
 
-async def async_unload_entry(hass, entry):
+async def async_unload_entry(
+    hass: HomeAssistant, entry: HomematicIPConfigEntry
+) -> bool:
     """Unload a config entry."""
-    hap = hass.data[DOMAIN].pop(entry.data[HMIPC_HAPID])
+    hap = entry.runtime_data
+    assert hap.reset_connection_listener is not None
+    hap.reset_connection_listener()
+
     return await hap.async_reset()
+
+
+async def async_migrate_entry(
+    hass: HomeAssistant, config_entry: config_entries.ConfigEntry
+) -> bool:
+    """Migrate the config entry from version 1 to version 2."""
+
+    if config_entry.version == 1:
+        _LOGGER.debug("Migrating HomematicIP Cloud config entry to version 2")
+
+        # Remove obsolete entities before the bulk unique_id rewrite.
+        # After rewrite, old-format patterns would no longer be matchable.
+        # HomematicipAccesspointStatus* entities are always obsolete (removed
+        # in firmware 2.2.12+). HomematicipBatterySensor_{hapid} entities for
+        # access points are also obsolete. Those legacy access point battery
+        # entities do not belong to a device registry device, unlike real
+        # device battery sensors, so we can safely remove them before rewrite.
+        entity_registry = er.async_get(hass)
+        entries = er.async_entries_for_config_entry(
+            entity_registry, config_entry.entry_id
+        )
+        for entry in entries:
+            if entry.unique_id.startswith("HomematicipAccesspointStatus") or (
+                entry.unique_id.startswith("HomematicipBatterySensor_")
+                and entry.device_id is None
+            ):
+                _LOGGER.debug(
+                    "Removing obsolete entity: %s (%s)",
+                    entry.entity_id,
+                    entry.unique_id,
+                )
+                entity_registry.async_remove(entry.entity_id)
+
+        # Pre-pass: deduplicate legacy entries that would migrate to the same
+        # new unique_id, and drop legacy entries whose target is already
+        # occupied by a stable-format entry from a previously-aborted
+        # migration. Two collision shapes are handled here:
+        #
+        #   a) Two or more legacy entries share the same new target id (e.g.
+        #      HomematicipNotificationLight + HomematicipNotificationLightV2
+        #      for the same HmIP-BSL after firmware 2.0.0, or Switch +
+        #      SwitchMeasuring on a device whose capability class changed).
+        #
+        #   b) One legacy entry shares its target with a stable-format entry
+        #      that was successfully migrated on a previous run before the
+        #      run aborted on a sibling collision. async_migrate_entries
+        #      commits each update individually with no rollback, so partial
+        #      migration is the steady state for any user who already hit
+        #      this bug at least once.
+        #
+        # When deduplicating pure-legacy groups, prefer the entry whose
+        # legacy class name is longer — that is the more specific variant
+        # (V2 over V1, Measuring over plain) and the one HA has been
+        # actively binding to since the class transition.
+        legacy_by_target: dict[tuple[str, str], list[er.RegistryEntry]] = {}
+        stable_targets: set[tuple[str, str]] = set()
+        for entry in er.async_entries_for_config_entry(
+            entity_registry, config_entry.entry_id
+        ):
+            new_id = _migrate_unique_id(entry.unique_id)
+            if new_id is None:
+                # Stable-format entry — record so we can detect (b).
+                stable_targets.add((entry.domain, entry.unique_id))
+                continue
+            legacy_by_target.setdefault((entry.domain, new_id), []).append(entry)
+
+        for key, group in legacy_by_target.items():
+            if key in stable_targets:
+                # (b): stable entry already occupies the target. Drop every
+                # legacy duplicate; the surviving stable entry stays put.
+                for dup in group:
+                    _LOGGER.warning(
+                        "Removing legacy registry entry %s (%s) — its"
+                        " migration target %s is already in use by a stable"
+                        " entry from a previously-aborted migration",
+                        dup.entity_id,
+                        dup.unique_id,
+                        key[1],
+                    )
+                    entity_registry.async_remove(dup.entity_id)
+                continue
+            if len(group) <= 1:
+                continue
+            # (a): multiple legacy entries collide on the same target.
+            group.sort(
+                key=lambda e: len(_match_legacy_class_name(e.unique_id) or ""),
+                reverse=True,
+            )
+            keeper, *duplicates = group
+            for dup in duplicates:
+                _LOGGER.warning(
+                    "Removing duplicate registry entry %s (%s) — collides"
+                    " with %s on migration to %s",
+                    dup.entity_id,
+                    dup.unique_id,
+                    keeper.entity_id,
+                    key[1],
+                )
+                entity_registry.async_remove(dup.entity_id)
+
+        @callback
+        def _update_unique_id(
+            entity_entry: er.RegistryEntry,
+        ) -> dict[str, str] | None:
+            new_unique_id = _migrate_unique_id(entity_entry.unique_id)
+            if new_unique_id is None:
+                _LOGGER.debug(
+                    "Skipping unique_id %s (already stable format)",
+                    entity_entry.unique_id,
+                )
+                return None
+            _LOGGER.debug(
+                "Migrating %s: %s -> %s",
+                entity_entry.entity_id,
+                entity_entry.unique_id,
+                new_unique_id,
+            )
+            return {"new_unique_id": new_unique_id}
+
+        await er.async_migrate_entries(hass, config_entry.entry_id, _update_unique_id)
+
+        hass.config_entries.async_update_entry(config_entry, version=2)
+        _LOGGER.info("Migration to version 2 successful")
+
+    return True

@@ -1,112 +1,159 @@
 """Helpers for mobile_app."""
+
+from collections.abc import Callable, Mapping
+from http import HTTPStatus
 import logging
-import json
-from typing import Callable, Dict, Tuple
+from typing import Any
 
-from aiohttp.web import json_response, Response
+from aiohttp.web import Response, json_response
+from nacl.encoding import Base64Encoder, HexEncoder, RawEncoder
+from nacl.secret import SecretBox
 
-from homeassistant.core import Context
-from homeassistant.helpers.json import JSONEncoder
-from homeassistant.helpers.typing import HomeAssistantType
+from homeassistant.const import (
+    ATTR_DEVICE_ID,
+    ATTR_MANUFACTURER,
+    ATTR_MODEL,
+    CONTENT_TYPE_JSON,
+)
+from homeassistant.core import Context, HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.json import json_bytes
+from homeassistant.util.json import JsonValueType, json_loads
 
-from .const import (ATTR_APP_DATA, ATTR_APP_ID, ATTR_APP_NAME, ATTR_DEVICE_ID,
-                    ATTR_APP_VERSION, ATTR_DEVICE_NAME, ATTR_MANUFACTURER,
-                    ATTR_MODEL, ATTR_OS_VERSION, ATTR_SUPPORTS_ENCRYPTION,
-                    CONF_SECRET, CONF_USER_ID, DATA_BINARY_SENSOR,
-                    DATA_DELETED_IDS, DATA_SENSOR, DOMAIN)
+from .const import (
+    ATTR_APP_DATA,
+    ATTR_APP_ID,
+    ATTR_APP_NAME,
+    ATTR_APP_VERSION,
+    ATTR_DEVICE_NAME,
+    ATTR_NO_LEGACY_ENCRYPTION,
+    ATTR_OS_VERSION,
+    ATTR_SUPPORTS_ENCRYPTION,
+    CONF_SECRET,
+    CONF_USER_ID,
+    DATA_DELETED_IDS,
+    DATA_LIVE_ACTIVITY_TOKENS,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def setup_decrypt() -> Tuple[int, Callable]:
+def setup_decrypt(
+    key_encoder: type[RawEncoder | HexEncoder],
+) -> Callable[[bytes, bytes], bytes]:
     """Return decryption function and length of key.
 
     Async friendly.
     """
-    from nacl.secret import SecretBox
-    from nacl.encoding import Base64Encoder
 
-    def decrypt(ciphertext, key):
+    def decrypt(ciphertext: bytes, key: bytes) -> bytes:
         """Decrypt ciphertext using key."""
-        return SecretBox(key).decrypt(ciphertext, encoder=Base64Encoder)
-    return (SecretBox.KEY_SIZE, decrypt)
+        return SecretBox(key, encoder=key_encoder).decrypt(
+            ciphertext, encoder=Base64Encoder
+        )
+
+    return decrypt
 
 
-def setup_encrypt() -> Tuple[int, Callable]:
+def setup_encrypt(
+    key_encoder: type[RawEncoder | HexEncoder],
+) -> Callable[[bytes, bytes], bytes]:
     """Return encryption function and length of key.
 
     Async friendly.
     """
-    from nacl.secret import SecretBox
-    from nacl.encoding import Base64Encoder
 
-    def encrypt(ciphertext, key):
+    def encrypt(ciphertext: bytes, key: bytes) -> bytes:
         """Encrypt ciphertext using key."""
-        return SecretBox(key).encrypt(ciphertext, encoder=Base64Encoder)
-    return (SecretBox.KEY_SIZE, encrypt)
+        return SecretBox(key, encoder=key_encoder).encrypt(
+            ciphertext, encoder=Base64Encoder
+        )
+
+    return encrypt
 
 
-def _decrypt_payload(key: str, ciphertext: str) -> Dict[str, str]:
+def _decrypt_payload_helper(
+    key: str | bytes,
+    ciphertext: bytes,
+    key_bytes: bytes,
+    key_encoder: type[RawEncoder | HexEncoder],
+) -> JsonValueType | None:
     """Decrypt encrypted payload."""
     try:
-        keylen, decrypt = setup_decrypt()
+        decrypt = setup_decrypt(key_encoder)
     except OSError:
-        _LOGGER.warning(
-            "Ignoring encrypted payload because libsodium not installed")
+        _LOGGER.warning("Ignoring encrypted payload because libsodium not installed")
         return None
 
     if key is None:
-        _LOGGER.warning(
-            "Ignoring encrypted payload because no decryption key known")
+        _LOGGER.warning("Ignoring encrypted payload because no decryption key known")
         return None
 
-    key = key.encode("utf-8")
-    key = key[:keylen]
-    key = key.ljust(keylen, b'\0')
-
-    try:
-        message = decrypt(ciphertext, key)
-        message = json.loads(message.decode("utf-8"))
-        _LOGGER.debug("Successfully decrypted mobile_app payload")
-        return message
-    except ValueError:
-        _LOGGER.warning("Ignoring encrypted payload because unable to decrypt")
-        return None
+    msg_bytes = decrypt(ciphertext, key_bytes)
+    message = json_loads(msg_bytes)
+    _LOGGER.debug("Successfully decrypted mobile_app payload")
+    return message
 
 
-def registration_context(registration: Dict) -> Context:
+def decrypt_payload(key: str, ciphertext: bytes) -> JsonValueType | None:
+    """Decrypt encrypted payload."""
+    return _decrypt_payload_helper(key, ciphertext, key.encode("utf-8"), HexEncoder)
+
+
+def _convert_legacy_encryption_key(key: str) -> bytes:
+    """Convert legacy encryption key."""
+    keylen = SecretBox.KEY_SIZE
+    key_bytes = key.encode("utf-8")
+    key_bytes = key_bytes[:keylen]
+    return key_bytes.ljust(keylen, b"\0")
+
+
+def decrypt_payload_legacy(key: str, ciphertext: bytes) -> JsonValueType | None:
+    """Decrypt encrypted payload."""
+    return _decrypt_payload_helper(
+        key, ciphertext, _convert_legacy_encryption_key(key), RawEncoder
+    )
+
+
+async def async_is_local_only_user(hass: HomeAssistant, user_id: str) -> bool:
+    """Return True if the user is local only."""
+    user = await hass.auth.async_get_user(user_id)
+    if user is None:
+        # Treat unknown/missing users as local-only to avoid exposing cloud URLs
+        return True
+    return user.local_only
+
+
+def registration_context(registration: Mapping[str, Any]) -> Context:
     """Generate a context from a request."""
     return Context(user_id=registration[CONF_USER_ID])
 
 
-def empty_okay_response(headers: Dict = None, status: int = 200) -> Response:
+def empty_okay_response(
+    headers: dict | None = None, status: HTTPStatus = HTTPStatus.OK
+) -> Response:
     """Return a Response with empty JSON object and a 200."""
-    return Response(text='{}', status=status, content_type='application/json',
-                    headers=headers)
+    return Response(
+        text="{}", status=status, content_type=CONTENT_TYPE_JSON, headers=headers
+    )
 
 
-def error_response(code: str, message: str, status: int = 400,
-                   headers: dict = None) -> Response:
+def error_response(
+    code: str,
+    message: str,
+    status: HTTPStatus = HTTPStatus.BAD_REQUEST,
+    headers: dict | None = None,
+) -> Response:
     """Return an error Response."""
-    return json_response({
-        'success': False,
-        'error': {
-            'code': code,
-            'message': message
-        }
-    }, status=status, headers=headers)
+    return json_response(
+        {"success": False, "error": {"code": code, "message": message}},
+        status=status,
+        headers=headers,
+    )
 
 
-def supports_encryption() -> bool:
-    """Test if we support encryption."""
-    try:
-        import nacl   # noqa pylint: disable=unused-import
-        return True
-    except OSError:
-        return False
-
-
-def safe_registration(registration: Dict) -> Dict:
+def safe_registration(registration: dict) -> dict:
     """Return a registration without sensitive values."""
     # Sensitive values: webhook_id, secret, cloudhook_url
     return {
@@ -122,42 +169,50 @@ def safe_registration(registration: Dict) -> Dict:
     }
 
 
-def savable_state(hass: HomeAssistantType) -> Dict:
+def savable_state(hass: HomeAssistant) -> dict:
     """Return a clean object containing things that should be saved."""
+    # pylint: disable-next=home-assistant-use-runtime-data
+    domain_data = hass.data[DOMAIN]
     return {
-        DATA_BINARY_SENSOR: hass.data[DOMAIN][DATA_BINARY_SENSOR],
-        DATA_DELETED_IDS: hass.data[DOMAIN][DATA_DELETED_IDS],
-        DATA_SENSOR: hass.data[DOMAIN][DATA_SENSOR],
+        DATA_DELETED_IDS: domain_data[DATA_DELETED_IDS],
+        DATA_LIVE_ACTIVITY_TOKENS: domain_data[DATA_LIVE_ACTIVITY_TOKENS],
     }
 
 
-def webhook_response(data, *, registration: Dict, status: int = 200,
-                     headers: Dict = None) -> Response:
+def webhook_response(
+    data: Any,
+    *,
+    registration: Mapping[str, Any],
+    status: HTTPStatus = HTTPStatus.OK,
+    headers: Mapping[str, str] | None = None,
+) -> Response:
     """Return a encrypted response if registration supports it."""
-    data = json.dumps(data, cls=JSONEncoder)
+    json_data = json_bytes(data)
 
     if registration[ATTR_SUPPORTS_ENCRYPTION]:
-        keylen, encrypt = setup_encrypt()
+        encrypt = setup_encrypt(
+            HexEncoder if ATTR_NO_LEGACY_ENCRYPTION in registration else RawEncoder
+        )
 
-        key = registration[CONF_SECRET].encode("utf-8")
-        key = key[:keylen]
-        key = key.ljust(keylen, b'\0')
+        if ATTR_NO_LEGACY_ENCRYPTION in registration:
+            key: bytes = registration[CONF_SECRET]
+        else:
+            key = _convert_legacy_encryption_key(registration[CONF_SECRET])
 
-        enc_data = encrypt(data.encode("utf-8"), key).decode("utf-8")
-        data = json.dumps({'encrypted': True, 'encrypted_data': enc_data})
+        enc_data = encrypt(json_data, key).decode("utf-8")
+        json_data = json_bytes({"encrypted": True, "encrypted_data": enc_data})
 
-    return Response(text=data, status=status, content_type='application/json',
-                    headers=headers)
+    return Response(
+        body=json_data, status=status, content_type=CONTENT_TYPE_JSON, headers=headers
+    )
 
 
-def device_info(registration: Dict) -> Dict:
+def device_info(registration: Mapping[str, Any]) -> DeviceInfo:
     """Return the device info for this registration."""
-    return {
-        'identifiers': {
-            (DOMAIN, registration[ATTR_DEVICE_ID]),
-        },
-        'manufacturer': registration[ATTR_MANUFACTURER],
-        'model': registration[ATTR_MODEL],
-        'device_name': registration[ATTR_DEVICE_NAME],
-        'sw_version': registration[ATTR_OS_VERSION],
-    }
+    return DeviceInfo(
+        identifiers={(DOMAIN, registration[ATTR_DEVICE_ID])},
+        manufacturer=registration[ATTR_MANUFACTURER],
+        model=registration[ATTR_MODEL],
+        name=registration[ATTR_DEVICE_NAME],
+        sw_version=registration[ATTR_OS_VERSION],
+    )

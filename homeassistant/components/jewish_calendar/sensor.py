@@ -1,194 +1,307 @@
-"""Platform to retrieve Jewish calendar information for Home Assistant."""
+"""Support for Jewish calendar sensors."""
+
+from collections.abc import Callable
+from dataclasses import dataclass
+import datetime as dt
 import logging
+from typing import override
 
-import voluptuous as vol
+from hdate import HDateInfo, Zmanim
+from hdate.holidays import HolidayDatabase
+from hdate.parasha import Parasha
 
-from homeassistant.components.sensor import PLATFORM_SCHEMA
-from homeassistant.const import (
-    CONF_LATITUDE, CONF_LONGITUDE, CONF_NAME, SUN_EVENT_SUNSET)
-import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.entity import Entity
-from homeassistant.helpers.sun import get_astral_event_date
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,
+)
+from homeassistant.const import EntityCategory
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 import homeassistant.util.dt as dt_util
 
+from .entity import JewishCalendarConfigEntry, JewishCalendarEntity
+
 _LOGGER = logging.getLogger(__name__)
-
-SENSOR_TYPES = {
-    'date': ['Date', 'mdi:judaism'],
-    'weekly_portion': ['Parshat Hashavua', 'mdi:book-open-variant'],
-    'holiday_name': ['Holiday', 'mdi:calendar-star'],
-    'holyness': ['Holyness', 'mdi:counter'],
-    'first_light': ['Alot Hashachar', 'mdi:weather-sunset-up'],
-    'gra_end_shma': ['Latest time for Shm"a GR"A', 'mdi:calendar-clock'],
-    'mga_end_shma': ['Latest time for Shm"a MG"A', 'mdi:calendar-clock'],
-    'plag_mincha': ['Plag Hamincha', 'mdi:weather-sunset-down'],
-    'first_stars': ['T\'set Hakochavim', 'mdi:weather-night'],
-    'upcoming_shabbat_candle_lighting': ['Upcoming Shabbat Candle Lighting',
-                                         'mdi:candle'],
-    'upcoming_shabbat_havdalah': ['Upcoming Shabbat Havdalah',
-                                  'mdi:weather-night'],
-    'upcoming_candle_lighting': ['Upcoming Candle Lighting', 'mdi:candle'],
-    'upcoming_havdalah': ['Upcoming Havdalah', 'mdi:weather-night'],
-    'issur_melacha_in_effect': ['Issur Melacha in Effect',
-                                'mdi:power-plug-off'],
-    'omer_count': ['Day of the Omer', 'mdi:counter'],
-}
-
-CONF_DIASPORA = 'diaspora'
-CONF_LANGUAGE = 'language'
-CONF_SENSORS = 'sensors'
-CONF_CANDLE_LIGHT_MINUTES = 'candle_lighting_minutes_before_sunset'
-CONF_HAVDALAH_OFFSET_MINUTES = 'havdalah_minutes_after_sunset'
-
-CANDLE_LIGHT_DEFAULT = 18
-
-DEFAULT_NAME = 'Jewish Calendar'
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-    vol.Optional(CONF_DIASPORA, default=False): cv.boolean,
-    vol.Optional(CONF_LATITUDE): cv.latitude,
-    vol.Optional(CONF_LONGITUDE): cv.longitude,
-    vol.Optional(CONF_LANGUAGE, default='english'):
-        vol.In(['hebrew', 'english']),
-    vol.Optional(CONF_CANDLE_LIGHT_MINUTES, default=CANDLE_LIGHT_DEFAULT): int,
-    # Default of 0 means use 8.5 degrees / 'three_stars' time.
-    vol.Optional(CONF_HAVDALAH_OFFSET_MINUTES, default=0): int,
-    vol.Optional(CONF_SENSORS, default=['date']):
-        vol.All(cv.ensure_list, vol.Length(min=1), [vol.In(SENSOR_TYPES)]),
-})
+PARALLEL_UPDATES = 0
 
 
-async def async_setup_platform(
-        hass, config, async_add_entities, discovery_info=None):
-    """Set up the Jewish calendar sensor platform."""
-    language = config.get(CONF_LANGUAGE)
-    name = config.get(CONF_NAME)
-    latitude = config.get(CONF_LATITUDE, hass.config.latitude)
-    longitude = config.get(CONF_LONGITUDE, hass.config.longitude)
-    diaspora = config.get(CONF_DIASPORA)
-    candle_lighting_offset = config.get(CONF_CANDLE_LIGHT_MINUTES)
-    havdalah_offset = config.get(CONF_HAVDALAH_OFFSET_MINUTES)
+@dataclass(frozen=True, kw_only=True)
+class JewishCalendarBaseSensorDescription(SensorEntityDescription):
+    """Base class describing Jewish Calendar sensor entities."""
 
-    if None in (latitude, longitude):
-        _LOGGER.error("Latitude or longitude not set in Home Assistant config")
-        return
-
-    dev = []
-    for sensor_type in config[CONF_SENSORS]:
-        dev.append(JewishCalSensor(
-            name, language, sensor_type, latitude, longitude,
-            hass.config.time_zone, diaspora, candle_lighting_offset,
-            havdalah_offset))
-    async_add_entities(dev, True)
+    value_fn: Callable | None
+    next_update_fn: Callable[[Zmanim], dt.datetime | None] | None
 
 
-class JewishCalSensor(Entity):
+@dataclass(frozen=True, kw_only=True)
+class JewishCalendarSensorDescription(JewishCalendarBaseSensorDescription):
+    """Class describing Jewish Calendar sensor entities."""
+
+    value_fn: Callable[[HDateInfo], str | int]
+    attr_fn: Callable[[HDateInfo], dict[str, str]] | None = None
+    options_fn: Callable[[bool], list[str]] | None = None
+    next_update_fn: Callable[[Zmanim], dt.datetime | None] | None = lambda zmanim: (
+        zmanim.shkia.local
+    )
+
+
+@dataclass(frozen=True, kw_only=True)
+class JewishCalendarTimestampSensorDescription(JewishCalendarBaseSensorDescription):
+    """Class describing Jewish Calendar sensor timestamp entities."""
+
+    value_fn: (
+        Callable[[HDateInfo, Callable[[dt.date], Zmanim]], dt.datetime | None] | None
+    ) = None
+    next_update_fn: Callable[[Zmanim], dt.datetime | None] | None = None
+
+
+INFO_SENSORS: tuple[JewishCalendarSensorDescription, ...] = (
+    JewishCalendarSensorDescription(
+        key="date",
+        translation_key="hebrew_date",
+        value_fn=lambda info: str(info.hdate),
+        attr_fn=lambda info: {
+            "hebrew_year": str(info.hdate.year),
+            "hebrew_month_name": str(info.hdate.month),
+            "hebrew_month_standard_order": str(info.hdate.month.value),
+            "hebrew_month_biblical_order": str(info.hdate.month.biblical_order),
+            "hebrew_day": str(info.hdate.day),
+        },
+    ),
+    JewishCalendarSensorDescription(
+        key="weekly_portion",
+        translation_key="weekly_portion",
+        device_class=SensorDeviceClass.ENUM,
+        options_fn=lambda _: [str(p) for p in Parasha],
+        value_fn=lambda info: info.upcoming_shabbat.parasha,
+        next_update_fn=lambda zmanim: zmanim.havdalah,
+    ),
+    JewishCalendarSensorDescription(
+        key="holiday",
+        translation_key="holiday",
+        device_class=SensorDeviceClass.ENUM,
+        options_fn=lambda diaspora: HolidayDatabase(diaspora).get_all_names(),
+        value_fn=lambda info: ", ".join(str(holiday) for holiday in info.holidays),
+        attr_fn=lambda info: {
+            "id": ", ".join(holiday.name for holiday in info.holidays),
+            "type": ", ".join(
+                dict.fromkeys(_holiday.type.name for _holiday in info.holidays)
+            ),
+        },
+        next_update_fn=lambda zmanim: (
+            zmanim.candle_lighting or zmanim.havdalah or zmanim.shkia.local
+        ),
+    ),
+    JewishCalendarSensorDescription(
+        key="omer_count",
+        translation_key="omer_count",
+        entity_registry_enabled_default=False,
+        value_fn=lambda info: info.omer.total_days,
+    ),
+    JewishCalendarSensorDescription(
+        key="daf_yomi",
+        translation_key="daf_yomi",
+        entity_registry_enabled_default=False,
+        value_fn=lambda info: info.daf_yomi,
+    ),
+)
+
+TIME_SENSORS: tuple[JewishCalendarTimestampSensorDescription, ...] = (
+    JewishCalendarTimestampSensorDescription(
+        key="alot_hashachar",
+        translation_key="alot_hashachar",
+        entity_registry_enabled_default=False,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="talit_and_tefillin",
+        translation_key="talit_and_tefillin",
+        entity_registry_enabled_default=False,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="netz_hachama",
+        translation_key="netz_hachama",
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="sof_zman_shema_gra",
+        translation_key="sof_zman_shema_gra",
+        entity_registry_enabled_default=False,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="sof_zman_shema_mga",
+        translation_key="sof_zman_shema_mga",
+        entity_registry_enabled_default=False,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="sof_zman_tfilla_gra",
+        translation_key="sof_zman_tfilla_gra",
+        entity_registry_enabled_default=False,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="sof_zman_tfilla_mga",
+        translation_key="sof_zman_tfilla_mga",
+        entity_registry_enabled_default=False,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="chatzot_hayom",
+        translation_key="chatzot_hayom",
+        entity_registry_enabled_default=False,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="mincha_gedola",
+        translation_key="mincha_gedola",
+        entity_registry_enabled_default=False,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="mincha_ketana",
+        translation_key="mincha_ketana",
+        entity_registry_enabled_default=False,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="plag_hamincha",
+        translation_key="plag_hamincha",
+        entity_registry_enabled_default=False,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="shkia",
+        translation_key="shkia",
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="tset_hakohavim_tsom",
+        translation_key="tset_hakohavim_tsom",
+        entity_registry_enabled_default=False,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="tset_hakohavim_shabbat",
+        translation_key="tset_hakohavim_shabbat",
+        entity_registry_enabled_default=False,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="upcoming_shabbat_candle_lighting",
+        translation_key="upcoming_shabbat_candle_lighting",
+        entity_registry_enabled_default=False,
+        value_fn=lambda at_date, mz: (
+            mz(at_date.upcoming_shabbat.previous_day.gdate).candle_lighting
+        ),
+        next_update_fn=lambda zmanim: zmanim.havdalah,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="upcoming_shabbat_havdalah",
+        translation_key="upcoming_shabbat_havdalah",
+        entity_registry_enabled_default=False,
+        value_fn=lambda at_date, mz: mz(at_date.upcoming_shabbat.gdate).havdalah,
+        next_update_fn=lambda zmanim: zmanim.havdalah,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="upcoming_candle_lighting",
+        translation_key="upcoming_candle_lighting",
+        value_fn=lambda at_date, mz: (
+            mz(
+                at_date.upcoming_shabbat_or_yom_tov.first_day.previous_day.gdate
+            ).candle_lighting
+        ),
+        next_update_fn=lambda zmanim: zmanim.havdalah,
+    ),
+    JewishCalendarTimestampSensorDescription(
+        key="upcoming_havdalah",
+        translation_key="upcoming_havdalah",
+        value_fn=lambda at_date, mz: (
+            mz(at_date.upcoming_shabbat_or_yom_tov.last_day.gdate).havdalah
+        ),
+        next_update_fn=lambda zmanim: zmanim.havdalah,
+    ),
+)
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: JewishCalendarConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the Jewish calendar sensors."""
+    sensors: list[JewishCalendarBaseSensor] = [
+        JewishCalendarSensor(config_entry, description) for description in INFO_SENSORS
+    ]
+    sensors.extend(
+        JewishCalendarTimeSensor(config_entry, description)
+        for description in TIME_SENSORS
+    )
+    async_add_entities(sensors, update_before_add=True)
+
+
+class JewishCalendarBaseSensor(JewishCalendarEntity, SensorEntity):
+    """Base class for Jewish calendar sensors."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    entity_description: JewishCalendarBaseSensorDescription
+
+    @override
+    def _update_times(self, zmanim: Zmanim) -> list[dt.datetime | None]:
+        """Return a list of times to update the sensor."""
+        if self.entity_description.next_update_fn is None:
+            return []
+        return [self.entity_description.next_update_fn(zmanim)]
+
+    def get_dateinfo(self) -> HDateInfo:
+        """Get the next date info."""
+        now = dt_util.now()
+        update = None
+
+        if self.entity_description.next_update_fn:
+            update = self.entity_description.next_update_fn(self.coordinator.zmanim)
+
+        _LOGGER.debug("Today: %s, update: %s", now.date(), update)
+        if update is not None and now >= update:
+            return self.coordinator.dateinfo.next_day
+        return self.coordinator.dateinfo
+
+
+class JewishCalendarSensor(JewishCalendarBaseSensor):
     """Representation of an Jewish calendar sensor."""
 
+    entity_description: JewishCalendarSensorDescription
+
     def __init__(
-            self, name, language, sensor_type, latitude, longitude, timezone,
-            diaspora, candle_lighting_offset=CANDLE_LIGHT_DEFAULT,
-            havdalah_offset=0):
+        self,
+        config_entry: JewishCalendarConfigEntry,
+        description: SensorEntityDescription,
+    ) -> None:
         """Initialize the Jewish calendar sensor."""
-        self.client_name = name
-        self._name = SENSOR_TYPES[sensor_type][0]
-        self.type = sensor_type
-        self._hebrew = (language == 'hebrew')
-        self._state = None
-        self.latitude = latitude
-        self.longitude = longitude
-        self.timezone = timezone
-        self.diaspora = diaspora
-        self.candle_lighting_offset = candle_lighting_offset
-        self.havdalah_offset = havdalah_offset
-        _LOGGER.debug("Sensor %s initialized", self.type)
+        super().__init__(config_entry, description)
+        # Set the options for enumeration sensors
+        if self.entity_description.options_fn is not None:
+            self._attr_options = self.entity_description.options_fn(
+                self.coordinator.data.diaspora
+            )
 
     @property
-    def name(self):
-        """Return the name of the sensor."""
-        return '{} {}'.format(self.client_name, self._name)
-
-    @property
-    def icon(self):
-        """Icon to display in the front end."""
-        return SENSOR_TYPES[self.type][1]
-
-    @property
-    def state(self):
+    @override
+    def native_value(self) -> str | int | dt.datetime | None:
         """Return the state of the sensor."""
-        return self._state
+        return self.entity_description.value_fn(self.get_dateinfo())
 
-    async def async_update(self):
-        """Update the state of the sensor."""
-        import hdate
+    @property
+    @override
+    def extra_state_attributes(self) -> dict[str, str]:
+        """Return the state attributes."""
+        if self.entity_description.attr_fn is None:
+            return {}
+        return self.entity_description.attr_fn(self.get_dateinfo())
 
-        now = dt_util.as_local(dt_util.now())
-        _LOGGER.debug("Now: %s Timezone = %s", now, now.tzinfo)
 
-        today = now.date()
-        sunset = dt_util.as_local(get_astral_event_date(
-            self.hass, SUN_EVENT_SUNSET, today))
+class JewishCalendarTimeSensor(JewishCalendarBaseSensor):
+    """Implement attributes for sensors returning times."""
 
-        _LOGGER.debug("Now: %s Sunset: %s", now, sunset)
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    entity_description: JewishCalendarTimestampSensorDescription
 
-        location = hdate.Location(latitude=self.latitude,
-                                  longitude=self.longitude,
-                                  timezone=self.timezone,
-                                  diaspora=self.diaspora)
-
-        def make_zmanim(date):
-            """Create a Zmanim object."""
-            return hdate.Zmanim(
-                date=date, location=location,
-                candle_lighting_offset=self.candle_lighting_offset,
-                havdalah_offset=self.havdalah_offset, hebrew=self._hebrew)
-
-        date = hdate.HDate(
-            today, diaspora=self.diaspora, hebrew=self._hebrew)
-        lagging_date = date
-
-        # Advance Hebrew date if sunset has passed.
-        # Not all sensors should advance immediately when the Hebrew date
-        # officially changes (i.e. after sunset), hence lagging_date.
-        if now > sunset:
-            date = date.next_day
-        today_times = make_zmanim(today)
-        if today_times.havdalah and now > today_times.havdalah:
-            lagging_date = lagging_date.next_day
-
-        # Terminology note: by convention in py-libhdate library, "upcoming"
-        # refers to "current" or "upcoming" dates.
-        if self.type == 'date':
-            self._state = date.hebrew_date
-        elif self.type == 'weekly_portion':
-            # Compute the weekly portion based on the upcoming shabbat.
-            self._state = lagging_date.upcoming_shabbat.parasha
-        elif self.type == 'holiday_name':
-            self._state = date.holiday_description
-        elif self.type == 'holyness':
-            self._state = date.holiday_type
-        elif self.type == 'upcoming_shabbat_candle_lighting':
-            times = make_zmanim(lagging_date.upcoming_shabbat
-                                .previous_day.gdate)
-            self._state = times.candle_lighting
-        elif self.type == 'upcoming_candle_lighting':
-            times = make_zmanim(lagging_date.upcoming_shabbat_or_yom_tov
-                                .first_day.previous_day.gdate)
-            self._state = times.candle_lighting
-        elif self.type == 'upcoming_shabbat_havdalah':
-            times = make_zmanim(lagging_date.upcoming_shabbat.gdate)
-            self._state = times.havdalah
-        elif self.type == 'upcoming_havdalah':
-            times = make_zmanim(lagging_date.upcoming_shabbat_or_yom_tov
-                                .last_day.gdate)
-            self._state = times.havdalah
-        elif self.type == 'issur_melacha_in_effect':
-            self._state = make_zmanim(now).issur_melacha_in_effect
-        elif self.type == 'omer_count':
-            self._state = date.omer_day
-        else:
-            times = make_zmanim(today).zmanim
-            self._state = times[self.type].time()
-
-        _LOGGER.debug("New value: %s", self._state)
+    @property
+    @override
+    def native_value(self) -> dt.datetime | None:
+        """Return the state of the sensor."""
+        if self.entity_description.value_fn is None:
+            return self.coordinator.zmanim.zmanim[self.entity_description.key].local
+        return self.entity_description.value_fn(
+            self.get_dateinfo(), self.coordinator.make_zmanim
+        )

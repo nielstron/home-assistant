@@ -1,78 +1,77 @@
 """Support for Abode Security System alarm control panels."""
-import logging
 
-import homeassistant.components.alarm_control_panel as alarm
-from homeassistant.const import (
-    ATTR_ATTRIBUTION, STATE_ALARM_ARMED_AWAY, STATE_ALARM_ARMED_HOME,
-    STATE_ALARM_DISARMED)
+from typing import override
 
-from . import ATTRIBUTION, DOMAIN as ABODE_DOMAIN, AbodeDevice
+from jaraco.abode.devices.alarm import Alarm
 
-_LOGGER = logging.getLogger(__name__)
+from homeassistant.components.alarm_control_panel import (
+    AlarmControlPanelEntity,
+    AlarmControlPanelEntityFeature,
+    AlarmControlPanelState,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-ICON = 'mdi:security'
-
-
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up an alarm control panel for an Abode device."""
-    data = hass.data[ABODE_DOMAIN]
-
-    alarm_devices = [AbodeAlarm(data, data.abode.get_alarm(), data.name)]
-
-    data.devices.extend(alarm_devices)
-
-    add_entities(alarm_devices)
+from . import AbodeConfigEntry
+from .entity import AbodeDevice
 
 
-class AbodeAlarm(AbodeDevice, alarm.AlarmControlPanel):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AbodeConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up Abode alarm control panel device."""
+    data = entry.runtime_data
+    async_add_entities(
+        [AbodeAlarm(data, await hass.async_add_executor_job(data.abode.get_alarm))]
+    )
+
+
+class AbodeAlarm(AbodeDevice, AlarmControlPanelEntity):
     """An alarm_control_panel implementation for Abode."""
 
-    def __init__(self, data, device, name):
-        """Initialize the alarm control panel."""
-        super().__init__(data, device)
-        self._name = name
+    _attr_name = None
+    _attr_code_arm_required = False
+    _attr_supported_features = (
+        AlarmControlPanelEntityFeature.ARM_HOME
+        | AlarmControlPanelEntityFeature.ARM_AWAY
+    )
+    _device: Alarm
 
     @property
-    def icon(self):
-        """Return the icon."""
-        return ICON
-
-    @property
-    def state(self):
+    @override
+    def alarm_state(self) -> AlarmControlPanelState | None:
         """Return the state of the device."""
         if self._device.is_standby:
-            state = STATE_ALARM_DISARMED
-        elif self._device.is_away:
-            state = STATE_ALARM_ARMED_AWAY
-        elif self._device.is_home:
-            state = STATE_ALARM_ARMED_HOME
-        else:
-            state = None
-        return state
+            return AlarmControlPanelState.DISARMED
+        if self._device.is_away:
+            return AlarmControlPanelState.ARMED_AWAY
+        if self._device.is_home:
+            return AlarmControlPanelState.ARMED_HOME
+        return None
 
-    def alarm_disarm(self, code=None):
+    @override
+    def alarm_disarm(self, code: str | None = None) -> None:
         """Send disarm command."""
         self._device.set_standby()
 
-    def alarm_arm_home(self, code=None):
+    @override
+    def alarm_arm_home(self, code: str | None = None) -> None:
         """Send arm home command."""
         self._device.set_home()
 
-    def alarm_arm_away(self, code=None):
+    @override
+    def alarm_arm_away(self, code: str | None = None) -> None:
         """Send arm away command."""
         self._device.set_away()
 
     @property
-    def name(self):
-        """Return the name of the alarm."""
-        return self._name or super().name
-
-    @property
-    def device_state_attributes(self):
+    @override
+    def extra_state_attributes(self) -> dict[str, str]:
         """Return the state attributes."""
         return {
-            ATTR_ATTRIBUTION: ATTRIBUTION,
-            'device_id': self._device.device_id,
-            'battery_backup': self._device.battery,
-            'cellular_backup': self._device.is_cellular,
+            "device_id": self._device.id,
+            "battery_backup": self._device.battery,
+            "cellular_backup": self._device.is_cellular,
         }

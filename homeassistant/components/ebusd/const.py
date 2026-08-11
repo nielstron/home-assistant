@@ -1,102 +1,313 @@
 """Constants for ebus component."""
-from homeassistant.const import ENERGY_KILO_WATT_HOUR
 
-DOMAIN = 'ebusd'
+from typing import TYPE_CHECKING
 
-#  SensorTypes:
+from homeassistant.components.sensor import SensorDeviceClass
+from homeassistant.const import (
+    PERCENTAGE,
+    UnitOfEnergy,
+    UnitOfPressure,
+    UnitOfTemperature,
+    UnitOfTime,
+)
+from homeassistant.util.hass_dict import HassKey
+
+if TYPE_CHECKING:
+    from . import EbusdData
+
+DOMAIN = "ebusd"
+EBUSD_DATA: HassKey[EbusdData] = HassKey(DOMAIN)
+
+#  SensorTypes from ebusdpy module :
 #  0='decimal', 1='time-schedule', 2='switch', 3='string', 4='value;status'
 
-SENSOR_TYPES = {
-    '700': {
-        'ActualFlowTemperatureDesired':
-            ['Hc1ActualFlowTempDesired', '°C', 'mdi:thermometer', 0],
-        'MaxFlowTemperatureDesired':
-            ['Hc1MaxFlowTempDesired', '°C', 'mdi:thermometer', 0],
-        'MinFlowTemperatureDesired':
-            ['Hc1MinFlowTempDesired', '°C', 'mdi:thermometer', 0],
-        'PumpStatus':
-            ['Hc1PumpStatus', None, 'mdi:toggle-switch', 2],
-        'HCSummerTemperatureLimit':
-            ['Hc1SummerTempLimit', '°C', 'mdi:weather-sunny', 0],
-        'HolidayTemperature':
-            ['HolidayTemp', '°C', 'mdi:thermometer', 0],
-        'HWTemperatureDesired':
-            ['HwcTempDesired', '°C', 'mdi:thermometer', 0],
-        'HWTimerMonday':
-            ['hwcTimer.Monday', None, 'mdi:timer', 1],
-        'HWTimerTuesday':
-            ['hwcTimer.Tuesday', None, 'mdi:timer', 1],
-        'HWTimerWednesday':
-            ['hwcTimer.Wednesday', None, 'mdi:timer', 1],
-        'HWTimerThursday':
-            ['hwcTimer.Thursday', None, 'mdi:timer', 1],
-        'HWTimerFriday':
-            ['hwcTimer.Friday', None, 'mdi:timer', 1],
-        'HWTimerSaturday':
-            ['hwcTimer.Saturday', None, 'mdi:timer', 1],
-        'HWTimerSunday':
-            ['hwcTimer.Sunday', None, 'mdi:timer', 1],
-        'WaterPressure':
-            ['WaterPressure', 'bar', 'mdi:water-pump', 0],
-        'Zone1RoomZoneMapping':
-            ['z1RoomZoneMapping', None, 'mdi:label', 0],
-        'Zone1NightTemperature':
-            ['z1NightTemp', '°C', 'mdi:weather-night', 0],
-        'Zone1DayTemperature':
-            ['z1DayTemp', '°C', 'mdi:weather-sunny', 0],
-        'Zone1HolidayTemperature':
-            ['z1HolidayTemp', '°C', 'mdi:thermometer', 0],
-        'Zone1RoomTemperature':
-            ['z1RoomTemp', '°C', 'mdi:thermometer', 0],
-        'Zone1ActualRoomTemperatureDesired':
-            ['z1ActualRoomTempDesired', '°C', 'mdi:thermometer', 0],
-        'Zone1TimerMonday':
-            ['z1Timer.Monday', None, 'mdi:timer', 1],
-        'Zone1TimerTuesday':
-            ['z1Timer.Tuesday', None, 'mdi:timer', 1],
-        'Zone1TimerWednesday':
-            ['z1Timer.Wednesday', None, 'mdi:timer', 1],
-        'Zone1TimerThursday':
-            ['z1Timer.Thursday', None, 'mdi:timer', 1],
-        'Zone1TimerFriday':
-            ['z1Timer.Friday', None, 'mdi:timer', 1],
-        'Zone1TimerSaturday':
-            ['z1Timer.Saturday', None, 'mdi:timer', 1],
-        'Zone1TimerSunday':
-            ['z1Timer.Sunday', None, 'mdi:timer', 1],
-        'Zone1OperativeMode':
-            ['z1OpMode', None, 'mdi:math-compass', 3],
-        'ContinuosHeating':
-            ['ContinuosHeating', '°C', 'mdi:weather-snowy', 0],
-        'PowerEnergyConsumptionLastMonth':
-            ['PrEnergySumHcLastMonth', ENERGY_KILO_WATT_HOUR, 'mdi:flash', 0],
-        'PowerEnergyConsumptionThisMonth':
-            ['PrEnergySumHcThisMonth', ENERGY_KILO_WATT_HOUR, 'mdi:flash', 0]
+type SensorSpecs = tuple[str, str | None, str | None, int, SensorDeviceClass | None]
+SENSOR_TYPES: dict[str, dict[str, SensorSpecs]] = {
+    "700": {
+        "ActualFlowTemperatureDesired": (
+            "Hc1ActualFlowTempDesired",
+            UnitOfTemperature.CELSIUS,
+            None,
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "MaxFlowTemperatureDesired": (
+            "Hc1MaxFlowTempDesired",
+            UnitOfTemperature.CELSIUS,
+            None,
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "MinFlowTemperatureDesired": (
+            "Hc1MinFlowTempDesired",
+            UnitOfTemperature.CELSIUS,
+            None,
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "FlowTemperature": (
+            "Hc1FlowTemp",
+            UnitOfTemperature.CELSIUS,
+            None,
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "PumpStatus": ("Hc1PumpStatus", None, "mdi:toggle-switch", 2, None),
+        "HCSummerTemperatureLimit": (
+            "Hc1SummerTempLimit",
+            UnitOfTemperature.CELSIUS,
+            "mdi:weather-sunny",
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "HolidayTemperature": (
+            "HolidayTemp",
+            UnitOfTemperature.CELSIUS,
+            None,
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "HWTemperatureDesired": (
+            "HwcTempDesired",
+            UnitOfTemperature.CELSIUS,
+            None,
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "HWActualTemperature": (
+            "HwcStorageTemp",
+            UnitOfTemperature.CELSIUS,
+            None,
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "HWTimerMonday": ("hwcTimer.Monday", None, "mdi:timer-outline", 1, None),
+        "HWTimerTuesday": ("hwcTimer.Tuesday", None, "mdi:timer-outline", 1, None),
+        "HWTimerWednesday": ("hwcTimer.Wednesday", None, "mdi:timer-outline", 1, None),
+        "HWTimerThursday": ("hwcTimer.Thursday", None, "mdi:timer-outline", 1, None),
+        "HWTimerFriday": ("hwcTimer.Friday", None, "mdi:timer-outline", 1, None),
+        "HWTimerSaturday": ("hwcTimer.Saturday", None, "mdi:timer-outline", 1, None),
+        "HWTimerSunday": ("hwcTimer.Sunday", None, "mdi:timer-outline", 1, None),
+        "HWOperativeMode": ("HwcOpMode", None, "mdi:math-compass", 3, None),
+        "WaterPressure": (
+            "WaterPressure",
+            UnitOfPressure.BAR,
+            "mdi:water-pump",
+            0,
+            SensorDeviceClass.PRESSURE,
+        ),
+        "Zone1RoomZoneMapping": ("z1RoomZoneMapping", None, "mdi:label", 0, None),
+        "Zone1NightTemperature": (
+            "z1NightTemp",
+            UnitOfTemperature.CELSIUS,
+            "mdi:weather-night",
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "Zone1DayTemperature": (
+            "z1DayTemp",
+            UnitOfTemperature.CELSIUS,
+            "mdi:weather-sunny",
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "Zone1HolidayTemperature": (
+            "z1HolidayTemp",
+            UnitOfTemperature.CELSIUS,
+            None,
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "Zone1RoomTemperature": (
+            "z1RoomTemp",
+            UnitOfTemperature.CELSIUS,
+            None,
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "Zone1ActualRoomTemperatureDesired": (
+            "z1ActualRoomTempDesired",
+            UnitOfTemperature.CELSIUS,
+            None,
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "OutsideTemperature": (
+            "DisplayedOutsideTemp",
+            UnitOfTemperature.CELSIUS,
+            None,
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "Zone1TimerMonday": ("z1Timer.Monday", None, "mdi:timer-outline", 1, None),
+        "Zone1TimerTuesday": ("z1Timer.Tuesday", None, "mdi:timer-outline", 1, None),
+        "Zone1TimerWednesday": (
+            "z1Timer.Wednesday",
+            None,
+            "mdi:timer-outline",
+            1,
+            None,
+        ),
+        "Zone1TimerThursday": ("z1Timer.Thursday", None, "mdi:timer-outline", 1, None),
+        "Zone1TimerFriday": ("z1Timer.Friday", None, "mdi:timer-outline", 1, None),
+        "Zone1TimerSaturday": ("z1Timer.Saturday", None, "mdi:timer-outline", 1, None),
+        "Zone1TimerSunday": ("z1Timer.Sunday", None, "mdi:timer-outline", 1, None),
+        "Zone1OperativeMode": ("z1OpMode", None, "mdi:math-compass", 3, None),
+        "ContinuosHeating": (
+            "ContinuosHeating",
+            UnitOfTemperature.CELSIUS,
+            "mdi:weather-snowy",
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "PowerEnergyConsumptionLastMonth": (
+            "PrEnergySumHcLastMonth",
+            UnitOfEnergy.KILO_WATT_HOUR,
+            "mdi:flash",
+            0,
+            SensorDeviceClass.ENERGY,
+        ),
+        "PowerEnergyConsumptionThisMonth": (
+            "PrEnergySumHcThisMonth",
+            UnitOfEnergy.KILO_WATT_HOUR,
+            "mdi:flash",
+            0,
+            SensorDeviceClass.ENERGY,
+        ),
+        "TotalEnergyConsumption": (
+            "PrEnergySum",
+            UnitOfEnergy.KILO_WATT_HOUR,
+            "mdi:flash",
+            0,
+            SensorDeviceClass.ENERGY,
+        ),
     },
-    'ehp': {
-        'HWTemperature':
-            ['HwcTemp', '°C', 'mdi:thermometer', 4],
-        'OutsideTemp':
-            ['OutsideTemp', '°C', 'mdi:thermometer', 4]
+    "ehp": {
+        "HWTemperature": (
+            "HwcTemp",
+            UnitOfTemperature.CELSIUS,
+            None,
+            4,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "OutsideTemp": (
+            "OutsideTemp",
+            UnitOfTemperature.CELSIUS,
+            None,
+            4,
+            SensorDeviceClass.TEMPERATURE,
+        ),
     },
-    'bai': {
-        'ReturnTemperature':
-            ['ReturnTemp', '°C', 'mdi:thermometer', 4],
-        'CentralHeatingPump':
-            ['WP', None, 'mdi:toggle-switch', 2],
-        'HeatingSwitch':
-            ['HeatingSwitch', None, 'mdi:toggle-switch', 2],
-        'FlowTemperature':
-            ['FlowTemp', '°C', 'mdi:thermometer', 4],
-        'Flame':
-            ['Flame', None, 'mdi:toggle-switch', 2],
-        'PowerEnergyConsumptionHeatingCircuit':
-            ['PrEnergySumHc1', ENERGY_KILO_WATT_HOUR, 'mdi:flash', 0],
-        'PowerEnergyConsumptionHotWaterCircuit':
-            ['PrEnergySumHwc1', ENERGY_KILO_WATT_HOUR, 'mdi:flash', 0],
-        'RoomThermostat':
-            ['DCRoomthermostat', None, 'mdi:toggle-switch', 2],
-        'HeatingPartLoad':
-            ['PartloadHcKW', ENERGY_KILO_WATT_HOUR, 'mdi:flash', 0]
-    }
+    "bai": {
+        "HotWaterTemperature": (
+            "HwcTemp",
+            UnitOfTemperature.CELSIUS,
+            None,
+            4,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "StorageTemperature": (
+            "StorageTemp",
+            UnitOfTemperature.CELSIUS,
+            None,
+            4,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "DesiredStorageTemperature": (
+            "StorageTempDesired",
+            UnitOfTemperature.CELSIUS,
+            None,
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "OutdoorsTemperature": (
+            "OutdoorstempSensor",
+            UnitOfTemperature.CELSIUS,
+            None,
+            4,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "WaterPressure": (
+            "WaterPressure",
+            UnitOfPressure.BAR,
+            "mdi:pipe",
+            4,
+            SensorDeviceClass.PRESSURE,
+        ),
+        "AverageIgnitionTime": (
+            "averageIgnitiontime",
+            UnitOfTime.SECONDS,
+            "mdi:av-timer",
+            0,
+            SensorDeviceClass.DURATION,
+        ),
+        "MaximumIgnitionTime": (
+            "maxIgnitiontime",
+            UnitOfTime.SECONDS,
+            "mdi:av-timer",
+            0,
+            SensorDeviceClass.DURATION,
+        ),
+        "MinimumIgnitionTime": (
+            "minIgnitiontime",
+            UnitOfTime.SECONDS,
+            "mdi:av-timer",
+            0,
+            SensorDeviceClass.DURATION,
+        ),
+        "ReturnTemperature": (
+            "ReturnTemp",
+            UnitOfTemperature.CELSIUS,
+            None,
+            4,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "CentralHeatingPump": ("WP", None, "mdi:toggle-switch", 2, None),
+        "HeatingSwitch": ("HeatingSwitch", None, "mdi:toggle-switch", 2, None),
+        "DesiredFlowTemperature": (
+            "FlowTempDesired",
+            UnitOfTemperature.CELSIUS,
+            None,
+            0,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "FlowTemperature": (
+            "FlowTemp",
+            UnitOfTemperature.CELSIUS,
+            None,
+            4,
+            SensorDeviceClass.TEMPERATURE,
+        ),
+        "Flame": ("Flame", None, "mdi:toggle-switch", 2, None),
+        "PowerEnergyConsumptionHeatingCircuit": (
+            "PrEnergySumHc1",
+            UnitOfEnergy.KILO_WATT_HOUR,
+            "mdi:flash",
+            0,
+            SensorDeviceClass.ENERGY,
+        ),
+        "PowerEnergyConsumptionHotWaterCircuit": (
+            "PrEnergySumHwc1",
+            UnitOfEnergy.KILO_WATT_HOUR,
+            "mdi:flash",
+            0,
+            SensorDeviceClass.ENERGY,
+        ),
+        "RoomThermostat": ("DCRoomthermostat", None, "mdi:toggle-switch", 2, None),
+        "HeatingPartLoad": (
+            "PartloadHcKW",
+            UnitOfEnergy.KILO_WATT_HOUR,
+            "mdi:flash",
+            0,
+            SensorDeviceClass.ENERGY,
+        ),
+        "StateNumber": ("StateNumber", None, "mdi:fire", 3, None),
+        "ModulationPercentage": (
+            "ModulationTempDesired",
+            PERCENTAGE,
+            "mdi:percent",
+            0,
+            None,
+        ),
+    },
 }

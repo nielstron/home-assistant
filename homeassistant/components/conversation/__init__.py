@@ -1,184 +1,354 @@
 """Support for functionality to have conversations with Home Assistant."""
-import logging
-import re
 
+from collections.abc import Callable
+import logging
+from typing import Any, Literal
+
+from hassil.recognize import RecognizeResult
 import voluptuous as vol
 
-from homeassistant import core
-from homeassistant.components import http
-from homeassistant.components.cover import (
-    INTENT_CLOSE_COVER, INTENT_OPEN_COVER)
-from homeassistant.components.http.data_validator import RequestDataValidator
-from homeassistant.const import EVENT_COMPONENT_LOADED
-from homeassistant.core import callback
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import MATCH_ALL, SERVICE_RELOAD
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+    callback,
+)
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, intent
-from homeassistant.loader import bind_hass
-from homeassistant.setup import ATTR_COMPONENT
+from homeassistant.helpers.entity_component import EntityComponent
+from homeassistant.helpers.reload import async_integration_yaml_config
+from homeassistant.helpers.typing import ConfigType
 
-from .util import create_matcher
+from .agent_manager import (
+    AgentInfo,
+    agent_id_validator,
+    async_converse,
+    async_get_agent,
+    get_agent_manager,
+)
+from .chat_log import (
+    AssistantContent,
+    AssistantContentDeltaDict,
+    Attachment,
+    ChatLog,
+    Content,
+    ConverseError,
+    SystemContent,
+    ToolResultContent,
+    ToolResultContentDeltaDict,
+    UserContent,
+    async_get_chat_log,
+)
+from .const import (
+    ATTR_AGENT_ID,
+    ATTR_CONVERSATION_ID,
+    ATTR_LANGUAGE,
+    ATTR_TEXT,
+    DATA_COMPONENT,
+    DOMAIN,
+    HOME_ASSISTANT_AGENT,
+    METADATA_CUSTOM_FILE,
+    METADATA_CUSTOM_SENTENCE,
+    SERVICE_PROCESS,
+    ConversationEntityFeature,
+)
+from .default_agent import async_setup_default_agent
+from .entity import ConversationEntity
+from .http import async_setup as async_setup_conversation_http
+from .models import AbstractConversationAgent, ConversationInput, ConversationResult
+from .trace import ConversationTraceEventType, async_conversation_trace_append
+from .util import async_get_result_from_chat_log
+
+__all__ = [
+    "DOMAIN",
+    "HOME_ASSISTANT_AGENT",
+    "AssistantContent",
+    "AssistantContentDeltaDict",
+    "Attachment",
+    "ChatLog",
+    "Content",
+    "ConversationEntity",
+    "ConversationEntityFeature",
+    "ConversationInput",
+    "ConversationResult",
+    "ConversationTraceEventType",
+    "ConverseError",
+    "SystemContent",
+    "ToolResultContent",
+    "ToolResultContentDeltaDict",
+    "UserContent",
+    "async_conversation_trace_append",
+    "async_converse",
+    "async_get_agent_info",
+    "async_get_chat_log",
+    "async_get_result_from_chat_log",
+    "async_set_agent",
+    "async_unset_agent",
+]
 
 _LOGGER = logging.getLogger(__name__)
 
-ATTR_TEXT = 'text'
-
-DOMAIN = 'conversation'
-
-REGEX_TURN_COMMAND = re.compile(r'turn (?P<name>(?: |\w)+) (?P<command>\w+)')
-REGEX_TYPE = type(re.compile(''))
-
-UTTERANCES = {
-    'cover': {
-        INTENT_OPEN_COVER: ['Open [the] [a] [an] {name}[s]'],
-        INTENT_CLOSE_COVER: ['Close [the] [a] [an] {name}[s]']
+SERVICE_PROCESS_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_TEXT): cv.string,
+        vol.Optional(ATTR_LANGUAGE): cv.string,
+        vol.Optional(ATTR_AGENT_ID): agent_id_validator,
+        vol.Optional(ATTR_CONVERSATION_ID): cv.string,
     }
-}
-
-SERVICE_PROCESS = 'process'
-
-SERVICE_PROCESS_SCHEMA = vol.Schema({
-    vol.Required(ATTR_TEXT): cv.string,
-})
-
-CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({
-    vol.Optional('intents'): vol.Schema({
-        cv.string: vol.All(cv.ensure_list, [cv.string])
-    })
-})}, extra=vol.ALLOW_EXTRA)
+)
 
 
-@core.callback
-@bind_hass
-def async_register(hass, intent_type, utterances):
-    """Register utterances and any custom intents.
+SERVICE_RELOAD_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_LANGUAGE): cv.string,
+        vol.Optional(ATTR_AGENT_ID): agent_id_validator,
+    }
+)
 
-    Registrations don't require conversations to be loaded. They will become
-    active once the conversation component is loaded.
+CONFIG_SCHEMA = vol.Schema(
+    {
+        vol.Optional(DOMAIN): vol.Schema(
+            {
+                vol.Optional("intents"): vol.Schema(
+                    {cv.string: vol.All(cv.ensure_list, [cv.string])}
+                )
+            }
+        ),
+    },
+    extra=vol.ALLOW_EXTRA,
+)
+
+
+@callback
+def async_set_agent(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    agent: AbstractConversationAgent,
+) -> None:
+    """Set the agent to handle the conversations."""
+    get_agent_manager(hass).async_set_agent(config_entry.entry_id, agent)
+
+
+@callback
+def async_unset_agent(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+) -> None:
+    """Unset the agent to handle the conversations."""
+    get_agent_manager(hass).async_unset_agent(config_entry.entry_id)
+
+
+@callback
+def async_get_conversation_languages(
+    hass: HomeAssistant, agent_id: str | None = None
+) -> set[str] | Literal["*"]:
+    """Return languages supported by conversation agents.
+
+    If an agent is specified, returns a set of languages supported by that agent.
+    If no agent is specified, return a set with the union of languages supported by
+    all conversation agents.
     """
-    intents = hass.data.get(DOMAIN)
+    agent_manager = get_agent_manager(hass)
+    agents: list[ConversationEntity | AbstractConversationAgent]
 
-    if intents is None:
-        intents = hass.data[DOMAIN] = {}
+    if agent_id:
+        agent = async_get_agent(hass, agent_id)
 
-    conf = intents.get(intent_type)
+        if agent is None:
+            raise ValueError(f"Agent {agent_id} not found")
 
-    if conf is None:
-        conf = intents[intent_type] = []
+        # Shortcut
+        if agent.supported_languages == MATCH_ALL:
+            return MATCH_ALL
 
-    for utterance in utterances:
-        if isinstance(utterance, REGEX_TYPE):
-            conf.append(utterance)
-        else:
-            conf.append(create_matcher(utterance))
+        agents = [agent]
+
+    else:
+        agents = list(hass.data[DATA_COMPONENT].entities)
+        for info in agent_manager.async_get_agent_info():
+            agent = agent_manager.async_get_agent(info.id)
+            assert agent is not None
+
+            # Shortcut
+            if agent.supported_languages == MATCH_ALL:
+                return MATCH_ALL
+
+            agents.append(agent)
+
+    languages: set[str] = set()
+
+    for agent in agents:
+        for language_tag in agent.supported_languages:
+            languages.add(language_tag)
+
+    return languages
 
 
-async def async_setup(hass, config):
+@callback
+def async_get_agent_info(
+    hass: HomeAssistant,
+    agent_id: str | None = None,
+) -> AgentInfo | None:
+    """Get information on the agent or None if not found."""
+    agent = async_get_agent(hass, agent_id)
+
+    if agent is None:
+        return None
+
+    if isinstance(agent, ConversationEntity):
+        name = agent.name
+        if not isinstance(name, str):
+            name = agent.entity_id
+        return AgentInfo(
+            id=agent.entity_id,
+            name=name,
+            supports_streaming=agent.supports_streaming,
+        )
+
+    manager = get_agent_manager(hass)
+
+    for agent_info in manager.async_get_agent_info():
+        if agent_info.id == agent_id:
+            return agent_info
+
+    return None
+
+
+async def async_prepare_agent(
+    hass: HomeAssistant, agent_id: str | None, language: str
+) -> None:
+    """Prepare given agent."""
+    agent = async_get_agent(hass, agent_id)
+
+    if agent is None:
+        raise ValueError("Invalid agent specified")
+
+    await agent.async_prepare(language)
+
+
+async def async_handle_sentence_triggers(
+    hass: HomeAssistant,
+    user_input: ConversationInput,
+    chat_log: ChatLog,
+) -> str | None:
+    """Try to match input against sentence triggers and return response text.
+
+    Returns None if no match occurred.
+    """
+    agent = get_agent_manager(hass).default_agent
+    assert agent is not None
+
+    return await agent.async_handle_sentence_triggers(user_input, chat_log)
+
+
+async def async_handle_intents(
+    hass: HomeAssistant,
+    user_input: ConversationInput,
+    chat_log: ChatLog,
+    *,
+    intent_filter: Callable[[RecognizeResult], bool] | None = None,
+) -> intent.IntentResponse | None:
+    """Try to match input against registered intents and return response.
+
+    Returns None if no match occurred.
+    """
+    agent = get_agent_manager(hass).default_agent
+    assert agent is not None
+
+    return await agent.async_handle_intents(
+        user_input, chat_log, intent_filter=intent_filter
+    )
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register the process service."""
-    config = config.get(DOMAIN, {})
-    intents = hass.data.get(DOMAIN)
+    entity_component = EntityComponent[ConversationEntity](_LOGGER, DOMAIN, hass)
+    hass.data[DATA_COMPONENT] = entity_component
 
-    if intents is None:
-        intents = hass.data[DOMAIN] = {}
+    manager = get_agent_manager(hass)
 
-    for intent_type, utterances in config.get('intents', {}).items():
-        conf = intents.get(intent_type)
+    hass_config_path = hass.config.path()
+    config_intents = _get_config_intents(config, hass_config_path)
+    manager.update_config_intents(config_intents)
 
-        if conf is None:
-            conf = intents[intent_type] = []
+    await async_setup_default_agent(hass, entity_component)
 
-        conf.extend(create_matcher(utterance) for utterance in utterances)
-
-    async def process(service):
+    async def handle_process(service: ServiceCall) -> ServiceResponse:
         """Parse text into commands."""
         text = service.data[ATTR_TEXT]
-        _LOGGER.debug('Processing: <%s>', text)
+        _LOGGER.debug("Processing: <%s>", text)
         try:
-            await _process(hass, text)
+            result = await async_converse(
+                hass=hass,
+                text=text,
+                conversation_id=service.data.get(ATTR_CONVERSATION_ID),
+                context=service.context,
+                language=service.data.get(ATTR_LANGUAGE),
+                agent_id=service.data.get(ATTR_AGENT_ID),
+            )
         except intent.IntentHandleError as err:
-            _LOGGER.error('Error processing %s: %s', text, err)
+            raise HomeAssistantError(f"Error processing {text}: {err}") from err
+
+        if service.return_response:
+            return result.as_dict()
+
+        return None
+
+    async def handle_reload(service: ServiceCall) -> None:
+        """Reload intents."""
+        language = service.data.get(ATTR_LANGUAGE)
+        if language is None:
+            conf = await async_integration_yaml_config(hass, DOMAIN)
+            if conf is not None:
+                config_intents = _get_config_intents(conf, hass_config_path)
+                manager.update_config_intents(config_intents)
+
+        agent = manager.default_agent
+        if agent is not None:
+            await agent.async_reload(language=language)
 
     hass.services.async_register(
-        DOMAIN, SERVICE_PROCESS, process, schema=SERVICE_PROCESS_SCHEMA)
-
-    hass.http.register_view(ConversationProcessView)
-
-    # We strip trailing 's' from name because our state matcher will fail
-    # if a letter is not there. By removing 's' we can match singular and
-    # plural names.
-
-    async_register(hass, intent.INTENT_TURN_ON, [
-        'Turn [the] [a] {name}[s] on',
-        'Turn on [the] [a] [an] {name}[s]',
-    ])
-    async_register(hass, intent.INTENT_TURN_OFF, [
-        'Turn [the] [a] [an] {name}[s] off',
-        'Turn off [the] [a] [an] {name}[s]',
-    ])
-    async_register(hass, intent.INTENT_TOGGLE, [
-        'Toggle [the] [a] [an] {name}[s]',
-        '[the] [a] [an] {name}[s] toggle',
-    ])
-
-    @callback
-    def register_utterances(component):
-        """Register utterances for a component."""
-        if component not in UTTERANCES:
-            return
-        for intent_type, sentences in UTTERANCES[component].items():
-            async_register(hass, intent_type, sentences)
-
-    @callback
-    def component_loaded(event):
-        """Handle a new component loaded."""
-        register_utterances(event.data[ATTR_COMPONENT])
-
-    hass.bus.async_listen(EVENT_COMPONENT_LOADED, component_loaded)
-
-    # Check already loaded components.
-    for component in hass.config.components:
-        register_utterances(component)
+        DOMAIN,
+        SERVICE_PROCESS,
+        handle_process,
+        schema=SERVICE_PROCESS_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_RELOAD, handle_reload, schema=SERVICE_RELOAD_SCHEMA
+    )
+    async_setup_conversation_http(hass)
 
     return True
 
 
-async def _process(hass, text):
-    """Process a line of text."""
-    intents = hass.data.get(DOMAIN, {})
+def _get_config_intents(config: ConfigType, hass_config_path: str) -> dict[str, Any]:
+    """Return config intents."""
+    intents = config.get(DOMAIN, {}).get("intents", {})
+    return {
+        intent_name: {
+            "data": [
+                {
+                    "sentences": sentences,
+                    "metadata": {
+                        METADATA_CUSTOM_SENTENCE: True,
+                        METADATA_CUSTOM_FILE: hass_config_path,
+                    },
+                }
+            ]
+        }
+        for intent_name, sentences in intents.items()
+    }
 
-    for intent_type, matchers in intents.items():
-        for matcher in matchers:
-            match = matcher.match(text)
 
-            if not match:
-                continue
-
-            response = await hass.helpers.intent.async_handle(
-                DOMAIN, intent_type,
-                {key: {'value': value} for key, value
-                 in match.groupdict().items()}, text)
-            return response
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up a config entry."""
+    return await hass.data[DATA_COMPONENT].async_setup_entry(entry)
 
 
-class ConversationProcessView(http.HomeAssistantView):
-    """View to retrieve shopping list content."""
-
-    url = '/api/conversation/process'
-    name = "api:conversation:process"
-
-    @RequestDataValidator(vol.Schema({
-        vol.Required('text'): str,
-    }))
-    async def post(self, request, data):
-        """Send a request for processing."""
-        hass = request.app['hass']
-
-        try:
-            intent_result = await _process(hass, data['text'])
-        except intent.IntentHandleError as err:
-            intent_result = intent.IntentResponse()
-            intent_result.async_set_speech(str(err))
-
-        if intent_result is None:
-            intent_result = intent.IntentResponse()
-            intent_result.async_set_speech("Sorry, I didn't understand that")
-
-        return self.json(intent_result)
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+    return await hass.data[DATA_COMPONENT].async_unload_entry(entry)

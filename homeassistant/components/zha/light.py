@@ -1,279 +1,230 @@
 """Lights on Zigbee Home Automation networks."""
-from datetime import timedelta
-import logging
 
-from zigpy.zcl.foundation import Status
-from homeassistant.components import light
-from homeassistant.const import STATE_ON
-from homeassistant.core import callback
+from collections.abc import Mapping
+import functools
+import logging
+from typing import Any, override
+
+from zha.application.platforms.light.const import (
+    ColorMode as ZhaColorMode,
+    LightEntityFeature as ZhaLightEntityFeature,
+)
+
+from homeassistant.components.light import (
+    ATTR_BRIGHTNESS,
+    ATTR_COLOR_TEMP_KELVIN,
+    ATTR_EFFECT,
+    ATTR_FLASH,
+    ATTR_TRANSITION,
+    ATTR_XY_COLOR,
+    ColorMode,
+    LightEntity,
+    LightEntityFeature,
+    LightEntityStateAttribute,
+)
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import STATE_ON, Platform
+from homeassistant.core import HomeAssistant, State, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.event import async_track_time_interval
-import homeassistant.util.color as color_util
-from .core.const import (
-    DATA_ZHA, DATA_ZHA_DISPATCHERS, ZHA_DISCOVERY_NEW, COLOR_CHANNEL,
-    ON_OFF_CHANNEL, LEVEL_CHANNEL, SIGNAL_ATTR_UPDATED, SIGNAL_SET_LEVEL
-    )
-from .entity import ZhaEntity
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import color as color_util
+
+from .entity import ZHASupportedFeaturesEntity
+from .helpers import (
+    SIGNAL_ADD_ENTITIES,
+    async_add_entities as zha_async_add_entities,
+    convert_zha_error_to_ha_error,
+    get_zha_data,
+)
+
+ZHA_TO_HA_COLOR_MODE = {
+    ZhaColorMode.UNKNOWN: ColorMode.UNKNOWN,
+    ZhaColorMode.ONOFF: ColorMode.ONOFF,
+    ZhaColorMode.BRIGHTNESS: ColorMode.BRIGHTNESS,
+    ZhaColorMode.COLOR_TEMP: ColorMode.COLOR_TEMP,
+    ZhaColorMode.XY: ColorMode.XY,
+}
+
+HA_TO_ZHA_COLOR_MODE = {v: k for k, v in ZHA_TO_HA_COLOR_MODE.items()}
+
+OFF_BRIGHTNESS = "off_brightness"
+OFF_WITH_TRANSITION = "off_with_transition"
 
 _LOGGER = logging.getLogger(__name__)
 
-DEFAULT_DURATION = 5
 
-CAPABILITIES_COLOR_XY = 0x08
-CAPABILITIES_COLOR_TEMP = 0x10
-
-UNSUPPORTED_ATTRIBUTE = 0x86
-SCAN_INTERVAL = timedelta(minutes=60)
-PARALLEL_UPDATES = 5
-
-
-async def async_setup_platform(hass, config, async_add_entities,
-                               discovery_info=None):
-    """Old way of setting up Zigbee Home Automation lights."""
-    pass
-
-
-async def async_setup_entry(hass, config_entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     """Set up the Zigbee Home Automation light from config entry."""
-    async def async_discover(discovery_info):
-        await _async_setup_entities(hass, config_entry, async_add_entities,
-                                    [discovery_info])
+    zha_data = get_zha_data(hass)
+    entities_to_create = zha_data.platforms[Platform.LIGHT]
 
     unsub = async_dispatcher_connect(
-        hass, ZHA_DISCOVERY_NEW.format(light.DOMAIN), async_discover)
-    hass.data[DATA_ZHA][DATA_ZHA_DISPATCHERS].append(unsub)
-
-    lights = hass.data.get(DATA_ZHA, {}).get(light.DOMAIN)
-    if lights is not None:
-        await _async_setup_entities(hass, config_entry, async_add_entities,
-                                    lights.values())
-        del hass.data[DATA_ZHA][light.DOMAIN]
-
-
-async def _async_setup_entities(hass, config_entry, async_add_entities,
-                                discovery_infos):
-    """Set up the ZHA lights."""
-    entities = []
-    for discovery_info in discovery_infos:
-        zha_light = Light(**discovery_info)
-        entities.append(zha_light)
-
-    async_add_entities(entities, update_before_add=True)
+        hass,
+        SIGNAL_ADD_ENTITIES,
+        functools.partial(
+            zha_async_add_entities, async_add_entities, Light, entities_to_create
+        ),
+    )
+    config_entry.async_on_unload(unsub)
 
 
-class Light(ZhaEntity, light.Light):
+class Light(LightEntity, ZHASupportedFeaturesEntity):
     """Representation of a ZHA or ZLL light."""
 
-    _domain = light.DOMAIN
+    @staticmethod
+    @functools.cache
+    @override
+    def _convert_supported_features(
+        zha_features: ZhaLightEntityFeature,
+    ) -> LightEntityFeature:
+        """Convert ZHA light features to HA light features."""
+        features = LightEntityFeature(0)
 
-    def __init__(self, unique_id, zha_device, channels, **kwargs):
-        """Initialize the ZHA light."""
-        super().__init__(unique_id, zha_device, channels, **kwargs)
-        self._supported_features = 0
-        self._color_temp = None
-        self._hs_color = None
-        self._brightness = None
-        self._on_off_channel = self.cluster_channels.get(ON_OFF_CHANNEL)
-        self._level_channel = self.cluster_channels.get(LEVEL_CHANNEL)
-        self._color_channel = self.cluster_channels.get(COLOR_CHANNEL)
+        if ZhaLightEntityFeature.EFFECT in zha_features:
+            features |= LightEntityFeature.EFFECT
+        if ZhaLightEntityFeature.FLASH in zha_features:
+            features |= LightEntityFeature.FLASH
+        if ZhaLightEntityFeature.TRANSITION in zha_features:
+            features |= LightEntityFeature.TRANSITION
 
-        if self._level_channel:
-            self._supported_features |= light.SUPPORT_BRIGHTNESS
-            self._supported_features |= light.SUPPORT_TRANSITION
-            self._brightness = 0
+        return features
 
-        if self._color_channel:
-            color_capabilities = self._color_channel.get_color_capabilities()
-            if color_capabilities & CAPABILITIES_COLOR_TEMP:
-                self._supported_features |= light.SUPPORT_COLOR_TEMP
+    @override
+    def _update_capability_attrs(self) -> None:
+        """Re-derive capability attributes from the cached state."""
+        super()._update_capability_attrs()
+        state = self._zha_state
 
-            if color_capabilities & CAPABILITIES_COLOR_XY:
-                self._supported_features |= light.SUPPORT_COLOR
-                self._hs_color = (0, 0)
+        color_modes: set[ColorMode] = set()
+        has_brightness = False
+        for color_mode in state.supported_color_modes:
+            if color_mode == ZhaColorMode.BRIGHTNESS:
+                has_brightness = True
+            if color_mode not in (ZhaColorMode.BRIGHTNESS, ZhaColorMode.ONOFF):
+                color_modes.add(ZHA_TO_HA_COLOR_MODE[color_mode])
+        if not color_modes:
+            color_modes.add(ColorMode.BRIGHTNESS if has_brightness else ColorMode.ONOFF)
+        self._attr_supported_color_modes = color_modes
+
+        self._attr_max_color_temp_kelvin = color_util.color_temperature_mired_to_kelvin(
+            state.min_mireds
+        )
+        self._attr_min_color_temp_kelvin = color_util.color_temperature_mired_to_kelvin(
+            state.max_mireds
+        )
+        self._attr_effect_list = state.effect_list
 
     @property
+    @override
+    def extra_state_attributes(self) -> Mapping[str, Any] | None:
+        """Return entity specific state attributes."""
+        state = self._zha_state
+        return {
+            "off_with_transition": state.off_with_transition,
+            "off_brightness": state.off_brightness,
+        }
+
+    @property
+    @override
     def is_on(self) -> bool:
         """Return true if entity is on."""
-        if self._state is None:
-            return False
-        return self._state
+        return self._zha_state.on
 
     @property
-    def brightness(self):
+    @override
+    def brightness(self) -> int:
         """Return the brightness of this light."""
-        return self._brightness
+        return self._zha_state.brightness
 
     @property
-    def device_state_attributes(self):
-        """Return state attributes."""
-        return self.state_attributes
-
-    def set_level(self, value):
-        """Set the brightness of this light between 0..254.
-
-        brightness level 255 is a special value instructing the device to come
-        on at `on_level` Zigbee attribute value, regardless of the last set
-        level
-        """
-        value = max(0, min(254, value))
-        self._brightness = value
-        self.async_schedule_update_ha_state()
+    @override
+    def xy_color(self) -> tuple[float, float] | None:
+        """Return the xy color value [float, float]."""
+        return self._zha_state.xy_color
 
     @property
-    def hs_color(self):
-        """Return the hs color value [int, int]."""
-        return self._hs_color
+    @override
+    def color_temp_kelvin(self) -> int | None:
+        """Return the color temperature value in Kelvin."""
+        return (
+            color_util.color_temperature_mired_to_kelvin(mireds)
+            if (mireds := self._zha_state.color_temp)
+            else None
+        )
 
     @property
-    def color_temp(self):
-        """Return the CT color value in mireds."""
-        return self._color_temp
+    @override
+    def color_mode(self) -> ColorMode:
+        """Return the color mode."""
+        if self._zha_state.color_mode is None:
+            return ColorMode.UNKNOWN
+        return ZHA_TO_HA_COLOR_MODE[self._zha_state.color_mode]
 
     @property
-    def supported_features(self):
-        """Flag supported features."""
-        return self._supported_features
+    @override
+    def effect(self) -> str | None:
+        """Return the current effect."""
+        return self._zha_state.effect
 
-    def async_set_state(self, state):
-        """Set the state."""
-        self._state = bool(state)
-        self.async_schedule_update_ha_state()
+    @convert_zha_error_to_ha_error()
+    @override
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn the entity on."""
+        color_temp = (
+            color_util.color_temperature_kelvin_to_mired(color_temp_k)
+            if (color_temp_k := kwargs.get(ATTR_COLOR_TEMP_KELVIN))
+            else None
+        )
+        await self.entity_data.entity.async_turn_on(
+            transition=kwargs.get(ATTR_TRANSITION),
+            brightness=kwargs.get(ATTR_BRIGHTNESS),
+            effect=kwargs.get(ATTR_EFFECT),
+            flash=kwargs.get(ATTR_FLASH),
+            color_temp=color_temp,
+            xy_color=kwargs.get(ATTR_XY_COLOR),
+        )
+        self.async_write_ha_state()
 
-    async def async_added_to_hass(self):
-        """Run when about to be added to hass."""
-        await super().async_added_to_hass()
-        await self.async_accept_signal(
-            self._on_off_channel, SIGNAL_ATTR_UPDATED, self.async_set_state)
-        if self._level_channel:
-            await self.async_accept_signal(
-                self._level_channel, SIGNAL_SET_LEVEL, self.set_level)
-        async_track_time_interval(self.hass, self.refresh, SCAN_INTERVAL)
+    @convert_zha_error_to_ha_error()
+    @override
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn the entity off."""
+        await self.entity_data.entity.async_turn_off(
+            transition=kwargs.get(ATTR_TRANSITION)
+        )
+        self.async_write_ha_state()
 
     @callback
-    def async_restore_last_state(self, last_state):
-        """Restore previous state."""
-        self._state = last_state.state == STATE_ON
-        if 'brightness' in last_state.attributes:
-            self._brightness = last_state.attributes['brightness']
-        if 'color_temp' in last_state.attributes:
-            self._color_temp = last_state.attributes['color_temp']
-        if 'hs_color' in last_state.attributes:
-            self._hs_color = last_state.attributes['hs_color']
-
-    async def async_turn_on(self, **kwargs):
-        """Turn the entity on."""
-        transition = kwargs.get(light.ATTR_TRANSITION)
-        duration = transition * 10 if transition else DEFAULT_DURATION
-        brightness = kwargs.get(light.ATTR_BRIGHTNESS)
-
-        t_log = {}
-        if (brightness is not None or transition) and \
-                self._supported_features & light.SUPPORT_BRIGHTNESS:
-            if brightness is not None:
-                level = min(254, brightness)
-            else:
-                level = self._brightness or 254
-            result = await self._level_channel.move_to_level_with_on_off(
-                level,
-                duration
+    @override
+    def restore_external_state_attributes(self, state: State) -> None:
+        """Restore entity state."""
+        color_temp = (
+            color_util.color_temperature_kelvin_to_mired(color_temp_k)
+            if (
+                color_temp_k := state.attributes.get(
+                    LightEntityStateAttribute.COLOR_TEMP_KELVIN
+                )
             )
-            t_log['move_to_level_with_on_off'] = result
-            if not isinstance(result, list) or result[1] is not Status.SUCCESS:
-                self.debug("turned on: %s", t_log)
-                return
-            self._state = bool(level)
-            if level:
-                self._brightness = level
-
-        if brightness is None or brightness:
-            result = await self._on_off_channel.on()
-            t_log['on_off'] = result
-            if not isinstance(result, list) or result[1] is not Status.SUCCESS:
-                self.debug("turned on: %s", t_log)
-                return
-            self._state = True
-
-        if light.ATTR_COLOR_TEMP in kwargs and \
-                self.supported_features & light.SUPPORT_COLOR_TEMP:
-            temperature = kwargs[light.ATTR_COLOR_TEMP]
-            result = await self._color_channel.move_to_color_temp(
-                temperature, duration)
-            t_log['move_to_color_temp'] = result
-            if not isinstance(result, list) or result[1] is not Status.SUCCESS:
-                self.debug("turned on: %s", t_log)
-                return
-            self._color_temp = temperature
-
-        if light.ATTR_HS_COLOR in kwargs and \
-                self.supported_features & light.SUPPORT_COLOR:
-            hs_color = kwargs[light.ATTR_HS_COLOR]
-            xy_color = color_util.color_hs_to_xy(*hs_color)
-            result = await self._color_channel.move_to_color(
-                int(xy_color[0] * 65535),
-                int(xy_color[1] * 65535),
-                duration,
-            )
-            t_log['move_to_color'] = result
-            if not isinstance(result, list) or result[1] is not Status.SUCCESS:
-                self.debug("turned on: %s", t_log)
-                return
-            self._hs_color = hs_color
-
-        self.debug("turned on: %s", t_log)
-        self.async_schedule_update_ha_state()
-
-    async def async_turn_off(self, **kwargs):
-        """Turn the entity off."""
-        duration = kwargs.get(light.ATTR_TRANSITION)
-        supports_level = self.supported_features & light.SUPPORT_BRIGHTNESS
-        if duration and supports_level:
-            result = await self._level_channel.move_to_level_with_on_off(
-                0,
-                duration*10
-            )
-        else:
-            result = await self._on_off_channel.off()
-        self.debug("turned off: %s", result)
-        if not isinstance(result, list) or result[1] is not Status.SUCCESS:
-            return
-        self._state = False
-        self.async_schedule_update_ha_state()
-
-    async def async_update(self):
-        """Attempt to retrieve on off state from the light."""
-        await super().async_update()
-        await self.async_get_state()
-
-    async def async_get_state(self, from_cache=True):
-        """Attempt to retrieve on off state from the light."""
-        self.debug("polling current state")
-        if self._on_off_channel:
-            self._state = await self._on_off_channel.get_attribute_value(
-                'on_off', from_cache=from_cache)
-        if self._level_channel:
-            self._brightness = await self._level_channel.get_attribute_value(
-                'current_level', from_cache=from_cache)
-        if self._color_channel:
-            color_capabilities = self._color_channel.get_color_capabilities()
-            if color_capabilities is not None and\
-                    color_capabilities & CAPABILITIES_COLOR_TEMP:
-                self._color_temp = await\
-                    self._color_channel.get_attribute_value(
-                        'color_temperature', from_cache=from_cache)
-            if color_capabilities is not None and\
-                    color_capabilities & CAPABILITIES_COLOR_XY:
-                color_x = await self._color_channel.get_attribute_value(
-                    'current_x', from_cache=from_cache)
-                color_y = await self._color_channel.get_attribute_value(
-                    'current_y', from_cache=from_cache)
-                if color_x is not None and color_y is not None:
-                    self._hs_color = color_util.color_xy_to_hs(
-                        float(color_x / 65535), float(color_y / 65535))
-
-    async def refresh(self, time):
-        """Call async_get_state at an interval."""
-        await self.async_get_state(from_cache=False)
-
-    def debug(self, msg, *args):
-        """Log debug message."""
-        _LOGGER.debug('%s: ' + msg, self.entity_id, *args)
+            else None
+        )
+        self.entity_data.entity.restore_external_state_attributes(
+            state=(state.state == STATE_ON),
+            off_with_transition=state.attributes.get(OFF_WITH_TRANSITION),
+            off_brightness=state.attributes.get(OFF_BRIGHTNESS),
+            brightness=state.attributes.get(LightEntityStateAttribute.BRIGHTNESS),
+            color_temp=color_temp,
+            xy_color=state.attributes.get(LightEntityStateAttribute.XY_COLOR),
+            color_mode=(
+                HA_TO_ZHA_COLOR_MODE[
+                    ColorMode(state.attributes[LightEntityStateAttribute.COLOR_MODE])
+                ]
+                if state.attributes.get(LightEntityStateAttribute.COLOR_MODE)
+                is not None
+                else None
+            ),
+            effect=state.attributes.get(LightEntityStateAttribute.EFFECT),
+        )

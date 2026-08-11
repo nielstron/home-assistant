@@ -1,34 +1,50 @@
 """Notification support for Homematic."""
-import logging
+
+from typing import Any, override
 
 import voluptuous as vol
 
 from homeassistant.components.notify import (
-    ATTR_DATA, PLATFORM_SCHEMA, BaseNotificationService)
-import homeassistant.helpers.config_validation as cv
-import homeassistant.helpers.template as template_helper
+    ATTR_DATA,
+    PLATFORM_SCHEMA as NOTIFY_PLATFORM_SCHEMA,
+    BaseNotificationService,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv, template as template_helper
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
-from . import (
-    ATTR_ADDRESS, ATTR_CHANNEL, ATTR_INTERFACE, ATTR_PARAM, ATTR_VALUE, DOMAIN,
-    SERVICE_SET_DEVICE_VALUE)
+from .const import (
+    ATTR_ADDRESS,
+    ATTR_CHANNEL,
+    ATTR_INTERFACE,
+    ATTR_PARAM,
+    ATTR_VALUE,
+    DOMAIN,
+    SERVICE_SET_DEVICE_VALUE,
+)
 
-_LOGGER = logging.getLogger(__name__)
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(ATTR_ADDRESS): vol.All(cv.string, vol.Upper),
-    vol.Required(ATTR_CHANNEL): vol.Coerce(int),
-    vol.Required(ATTR_PARAM): vol.All(cv.string, vol.Upper),
-    vol.Required(ATTR_VALUE): cv.match_all,
-    vol.Optional(ATTR_INTERFACE): cv.string,
-})
+PLATFORM_SCHEMA = NOTIFY_PLATFORM_SCHEMA.extend(
+    {
+        vol.Required(ATTR_ADDRESS): vol.All(cv.string, vol.Upper),
+        vol.Required(ATTR_CHANNEL): vol.Coerce(int),
+        vol.Required(ATTR_PARAM): vol.All(cv.string, vol.Upper),
+        vol.Required(ATTR_VALUE): cv.match_all,
+        vol.Optional(ATTR_INTERFACE): cv.string,
+    }
+)
 
 
-def get_service(hass, config, discovery_info=None):
+def get_service(
+    hass: HomeAssistant,
+    config: ConfigType,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> HomematicNotificationService:
     """Get the Homematic notification service."""
     data = {
         ATTR_ADDRESS: config[ATTR_ADDRESS],
         ATTR_CHANNEL: config[ATTR_CHANNEL],
         ATTR_PARAM: config[ATTR_PARAM],
-        ATTR_VALUE: config[ATTR_VALUE]
+        ATTR_VALUE: config[ATTR_VALUE],
     }
     if ATTR_INTERFACE in config:
         data[ATTR_INTERFACE] = config[ATTR_INTERFACE]
@@ -44,7 +60,8 @@ class HomematicNotificationService(BaseNotificationService):
         self.hass = hass
         self.data = data
 
-    def send_message(self, message="", **kwargs):
+    @override
+    def send_message(self, message: str = "", **kwargs: Any) -> None:
         """Send a notification to the device."""
         data = {**self.data, **kwargs.get(ATTR_DATA, {})}
 

@@ -1,170 +1,96 @@
-"""The tests for the Unifi direct device tracker platform."""
-import os
-from datetime import timedelta
-from asynctest import mock, patch
+"""Tests for UniFi AP Direct device tracker."""
 
-import pytest
-import voluptuous as vol
+from unifi_ap import UniFiAPConnectionException
 
+from homeassistant import config_entries
+from homeassistant.components.unifi_direct.const import DOMAIN
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_registry import EntityRegistry
+from homeassistant.helpers.issue_registry import IssueRegistry
 from homeassistant.setup import async_setup_component
-from homeassistant.components.device_tracker.legacy import YAML_DEVICES
-from homeassistant.components.device_tracker import (
-    CONF_CONSIDER_HOME, CONF_TRACK_NEW, CONF_AWAY_HIDE,
-    CONF_NEW_DEVICE_DEFAULTS)
-from homeassistant.components.unifi_direct.device_tracker import (
-    DOMAIN, CONF_PORT, PLATFORM_SCHEMA, _response_to_json, get_scanner)
-from homeassistant.const import (CONF_PLATFORM, CONF_PASSWORD, CONF_USERNAME,
-                                 CONF_HOST)
-
-from tests.common import (
-    assert_setup_component, mock_component, load_fixture)
-
-scanner_path = 'homeassistant.components.unifi_direct.device_tracker.' + \
-    'UnifiDeviceScanner'
 
 
-@pytest.fixture(autouse=True)
-def setup_comp(hass):
-    """Initialize components."""
-    mock_component(hass, 'zone')
-    yaml_devices = hass.config.path(YAML_DEVICES)
-    yield
-    if os.path.isfile(yaml_devices):
-        os.remove(yaml_devices)
+async def test_device_tracker_entities_created(
+    hass: HomeAssistant,
+    mock_config_entry,
+    mock_unifiap,
+    entity_registry: EntityRegistry,
+) -> None:
+    """Test that device tracker entities are created from coordinator data."""
+    mock_config_entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    # Entity registry should contain the device_tracker entities created by the integration
+    entries = [
+        entry
+        for entry in entity_registry.entities.values()
+        if entry.domain == "device_tracker" and entry.platform == "unifi_direct"
+    ]
+    assert len(entries) == 2
+
+    entity_ids = {entry.entity_id for entry in entries}
+    assert any(
+        entity_id.startswith("device_tracker.my_phone") for entity_id in entity_ids
+    )
+    assert any(
+        entity_id.startswith("device_tracker.my_laptop") for entity_id in entity_ids
+    )
 
 
-@patch(scanner_path, return_value=mock.MagicMock())
-async def test_get_scanner(unifi_mock, hass):
-    """Test creating an Unifi direct scanner with a password."""
-    conf_dict = {
-        DOMAIN: {
-            CONF_PLATFORM: 'unifi_direct',
-            CONF_HOST: 'fake_host',
-            CONF_USERNAME: 'fake_user',
-            CONF_PASSWORD: 'fake_pass',
-            CONF_TRACK_NEW: True,
-            CONF_CONSIDER_HOME: timedelta(seconds=180),
-            CONF_NEW_DEVICE_DEFAULTS: {
-                CONF_TRACK_NEW: True,
-                CONF_AWAY_HIDE: False
-            }
-        }
+async def test_setup_scanner_legacy_platform_imports_config_entry(
+    hass: HomeAssistant,
+    mock_unifiap,
+) -> None:
+    """Test legacy device tracker setup triggers config flow import."""
+    config = {
+        CONF_HOST: "192.168.1.2",
+        CONF_USERNAME: "admin",
+        CONF_PASSWORD: "password",
+        CONF_PORT: 22,
     }
 
-    with assert_setup_component(1, DOMAIN):
-        assert await async_setup_component(hass, DOMAIN, conf_dict)
+    assert await async_setup_component(
+        hass,
+        "device_tracker",
+        {"device_tracker": [{"platform": DOMAIN, **config}]},
+    )
+    await hass.async_block_till_done()
 
-    conf_dict[DOMAIN][CONF_PORT] = 22
-    assert unifi_mock.call_args == mock.call(conf_dict[DOMAIN])
-
-
-@patch('pexpect.pxssh.pxssh')
-async def test_get_device_name(mock_ssh, hass):
-    """Testing MAC matching."""
-    conf_dict = {
-        DOMAIN: {
-            CONF_PLATFORM: 'unifi_direct',
-            CONF_HOST: 'fake_host',
-            CONF_USERNAME: 'fake_user',
-            CONF_PASSWORD: 'fake_pass',
-            CONF_PORT: 22,
-            CONF_TRACK_NEW: True,
-            CONF_CONSIDER_HOME: timedelta(seconds=180)
-        }
-    }
-    mock_ssh.return_value.before = load_fixture('unifi_direct.txt')
-    scanner = get_scanner(hass, conf_dict)
-    devices = scanner.scan_devices()
-    assert 23 == len(devices)
-    assert "iPhone" == \
-        scanner.get_device_name("98:00:c6:56:34:12")
-    assert "iPhone" == \
-        scanner.get_device_name("98:00:C6:56:34:12")
+    entries = hass.config_entries.async_entries(DOMAIN)
+    assert len(entries) == 1
+    assert entries[0].data == config
+    assert entries[0].source == config_entries.SOURCE_IMPORT
 
 
-@patch('pexpect.pxssh.pxssh.logout')
-@patch('pexpect.pxssh.pxssh.login')
-async def test_failed_to_log_in(mock_login, mock_logout, hass):
-    """Testing exception at login results in False."""
-    from pexpect import exceptions
-
-    conf_dict = {
-        DOMAIN: {
-            CONF_PLATFORM: 'unifi_direct',
-            CONF_HOST: 'fake_host',
-            CONF_USERNAME: 'fake_user',
-            CONF_PASSWORD: 'fake_pass',
-            CONF_PORT: 22,
-            CONF_TRACK_NEW: True,
-            CONF_CONSIDER_HOME: timedelta(seconds=180)
-        }
+async def test_setup_scanner_legacy_platform_creates_issue_on_cannot_connect(
+    hass: HomeAssistant, mock_unifiap, issue_registry: IssueRegistry
+) -> None:
+    """Test that issue is created when legacy device tracker setup cannot connect."""
+    config = {
+        CONF_HOST: "192.168.1.2",
+        CONF_USERNAME: "admin",
+        CONF_PASSWORD: "password",
+        CONF_PORT: 22,
     }
 
-    mock_login.side_effect = exceptions.EOF("Test")
-    scanner = get_scanner(hass, conf_dict)
-    assert not scanner
+    mock_unifiap.return_value.get_clients.side_effect = UniFiAPConnectionException(
+        "fail"
+    )
 
+    assert await async_setup_component(
+        hass,
+        "device_tracker",
+        {"device_tracker": [{"platform": DOMAIN, **config}]},
+    )
+    await hass.async_block_till_done()
 
-@patch('pexpect.pxssh.pxssh.logout')
-@patch('pexpect.pxssh.pxssh.login', autospec=True)
-@patch('pexpect.pxssh.pxssh.prompt')
-@patch('pexpect.pxssh.pxssh.sendline')
-async def test_to_get_update(mock_sendline, mock_prompt, mock_login,
-                             mock_logout, hass):
-    """Testing exception in get_update matching."""
-    conf_dict = {
-        DOMAIN: {
-            CONF_PLATFORM: 'unifi_direct',
-            CONF_HOST: 'fake_host',
-            CONF_USERNAME: 'fake_user',
-            CONF_PASSWORD: 'fake_pass',
-            CONF_PORT: 22,
-            CONF_TRACK_NEW: True,
-            CONF_CONSIDER_HOME: timedelta(seconds=180)
-        }
-    }
+    # Verify the issue was created in the registry
+    issue = issue_registry.async_get_issue(DOMAIN, "yaml_import_cannot_connect")
 
-    scanner = get_scanner(hass, conf_dict)
-    # mock_sendline.side_effect = AssertionError("Test")
-    mock_prompt.side_effect = AssertionError("Test")
-    devices = scanner._get_update()  # pylint: disable=protected-access
-    assert devices is None
-
-
-def test_good_response_parses(hass):
-    """Test that the response form the AP parses to JSON correctly."""
-    response = _response_to_json(load_fixture('unifi_direct.txt'))
-    assert response != {}
-
-
-def test_bad_response_returns_none(hass):
-    """Test that a bad response form the AP parses to JSON correctly."""
-    assert _response_to_json("{(}") == {}
-
-
-def test_config_error():
-    """Test for configuration errors."""
-    with pytest.raises(vol.Invalid):
-        PLATFORM_SCHEMA({
-            # no username
-            CONF_PASSWORD: 'password',
-            CONF_PLATFORM: DOMAIN,
-            CONF_HOST: 'myhost',
-            'port': 123,
-        })
-    with pytest.raises(vol.Invalid):
-        PLATFORM_SCHEMA({
-            # no password
-            CONF_USERNAME: 'foo',
-            CONF_PLATFORM: DOMAIN,
-            CONF_HOST: 'myhost',
-            'port': 123,
-        })
-    with pytest.raises(vol.Invalid):
-        PLATFORM_SCHEMA({
-            CONF_PLATFORM: DOMAIN,
-            CONF_USERNAME: 'foo',
-            CONF_PASSWORD: 'password',
-            CONF_HOST: 'myhost',
-            'port': 'foo',  # bad port!
-        })
+    assert len(issue_registry.issues) == 1
+    assert issue is not None
+    assert issue.translation_key == "yaml_import_cannot_connect"
+    assert issue.translation_placeholders == {"host": "192.168.1.2"}

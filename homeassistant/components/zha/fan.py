@@ -1,148 +1,139 @@
 """Fans on Zigbee Home Automation networks."""
-import logging
 
-from homeassistant.core import callback
-from homeassistant.components.fan import (
-    DOMAIN, SPEED_HIGH, SPEED_LOW, SPEED_MEDIUM, SPEED_OFF, SUPPORT_SET_SPEED,
-    FanEntity)
+import functools
+from typing import Any, override
+
+from zha.application.platforms.fan.const import FanEntityFeature as ZHAFanEntityFeature
+
+from homeassistant.components.fan import FanEntity, FanEntityFeature
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from .core.const import (
-    DATA_ZHA, DATA_ZHA_DISPATCHERS, ZHA_DISCOVERY_NEW, FAN_CHANNEL,
-    SIGNAL_ATTR_UPDATED
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+
+from .entity import ZHASupportedFeaturesEntity
+from .helpers import (
+    SIGNAL_ADD_ENTITIES,
+    async_add_entities as zha_async_add_entities,
+    convert_zha_error_to_ha_error,
+    get_zha_data,
 )
-from .entity import ZhaEntity
-
-_LOGGER = logging.getLogger(__name__)
-
-# Additional speeds in zigbee's ZCL
-# Spec is unclear as to what this value means. On King Of Fans HBUniversal
-# receiver, this means Very High.
-SPEED_ON = 'on'
-# The fan speed is self-regulated
-SPEED_AUTO = 'auto'
-# When the heated/cooled space is occupied, the fan is always on
-SPEED_SMART = 'smart'
-
-SPEED_LIST = [
-    SPEED_OFF,
-    SPEED_LOW,
-    SPEED_MEDIUM,
-    SPEED_HIGH,
-    SPEED_ON,
-    SPEED_AUTO,
-    SPEED_SMART
-]
-
-VALUE_TO_SPEED = {i: speed for i, speed in enumerate(SPEED_LIST)}
-SPEED_TO_VALUE = {speed: i for i, speed in enumerate(SPEED_LIST)}
 
 
-async def async_setup_platform(hass, config, async_add_entities,
-                               discovery_info=None):
-    """Old way of setting up Zigbee Home Automation fans."""
-    pass
-
-
-async def async_setup_entry(hass, config_entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     """Set up the Zigbee Home Automation fan from config entry."""
-    async def async_discover(discovery_info):
-        await _async_setup_entities(hass, config_entry, async_add_entities,
-                                    [discovery_info])
+    zha_data = get_zha_data(hass)
+    entities_to_create = zha_data.platforms[Platform.FAN]
 
     unsub = async_dispatcher_connect(
-        hass, ZHA_DISCOVERY_NEW.format(DOMAIN), async_discover)
-    hass.data[DATA_ZHA][DATA_ZHA_DISPATCHERS].append(unsub)
-
-    fans = hass.data.get(DATA_ZHA, {}).get(DOMAIN)
-    if fans is not None:
-        await _async_setup_entities(hass, config_entry, async_add_entities,
-                                    fans.values())
-        del hass.data[DATA_ZHA][DOMAIN]
-
-
-async def _async_setup_entities(hass, config_entry, async_add_entities,
-                                discovery_infos):
-    """Set up the ZHA fans."""
-    entities = []
-    for discovery_info in discovery_infos:
-        entities.append(ZhaFan(**discovery_info))
-
-    async_add_entities(entities, update_before_add=True)
+        hass,
+        SIGNAL_ADD_ENTITIES,
+        functools.partial(
+            zha_async_add_entities, async_add_entities, ZhaFan, entities_to_create
+        ),
+    )
+    config_entry.async_on_unload(unsub)
 
 
-class ZhaFan(ZhaEntity, FanEntity):
+class ZhaFan(FanEntity, ZHASupportedFeaturesEntity):
     """Representation of a ZHA fan."""
 
-    _domain = DOMAIN
+    _attr_translation_key: str = "fan"
 
-    def __init__(self, unique_id, zha_device, channels, **kwargs):
-        """Init this sensor."""
-        super().__init__(unique_id, zha_device, channels, **kwargs)
-        self._fan_channel = self.cluster_channels.get(FAN_CHANNEL)
+    @staticmethod
+    @functools.cache
+    @override
+    def _convert_supported_features(
+        zha_features: ZHAFanEntityFeature,
+    ) -> FanEntityFeature:
+        """Convert ZHA fan features to HA fan features."""
+        features = FanEntityFeature(0)
 
-    async def async_added_to_hass(self):
-        """Run when about to be added to hass."""
-        await super().async_added_to_hass()
-        await self.async_accept_signal(
-            self._fan_channel, SIGNAL_ATTR_UPDATED, self.async_set_state)
+        if ZHAFanEntityFeature.DIRECTION in zha_features:
+            features |= FanEntityFeature.DIRECTION
+        if ZHAFanEntityFeature.OSCILLATE in zha_features:
+            features |= FanEntityFeature.OSCILLATE
+        if ZHAFanEntityFeature.PRESET_MODE in zha_features:
+            features |= FanEntityFeature.PRESET_MODE
+        if ZHAFanEntityFeature.SET_SPEED in zha_features:
+            features |= FanEntityFeature.SET_SPEED
+        if ZHAFanEntityFeature.TURN_ON in zha_features:
+            features |= FanEntityFeature.TURN_ON
+        if ZHAFanEntityFeature.TURN_OFF in zha_features:
+            features |= FanEntityFeature.TURN_OFF
 
-    @callback
-    def async_restore_last_state(self, last_state):
-        """Restore previous state."""
-        self._state = VALUE_TO_SPEED.get(last_state.state, last_state.state)
-
-    @property
-    def supported_features(self) -> int:
-        """Flag supported features."""
-        return SUPPORT_SET_SPEED
-
-    @property
-    def speed_list(self) -> list:
-        """Get the list of available speeds."""
-        return SPEED_LIST
+        return features
 
     @property
-    def speed(self) -> str:
-        """Return the current speed."""
-        return self._state
+    @override
+    def preset_mode(self) -> str | None:
+        """Return the current preset mode."""
+        return self._zha_state.preset_mode
 
     @property
-    def is_on(self) -> bool:
-        """Return true if entity is on."""
-        if self._state is None:
-            return False
-        return self._state != SPEED_OFF
+    @override
+    def preset_modes(self) -> list[str]:
+        """Return the available preset modes."""
+        return self._zha_state.preset_modes
 
     @property
-    def device_state_attributes(self):
-        """Return state attributes."""
-        return self.state_attributes
+    def default_on_percentage(self) -> int:
+        """Return the default on percentage."""
+        return self._zha_state.default_on_percentage
 
-    def async_set_state(self, state):
-        """Handle state update from channel."""
-        self._state = VALUE_TO_SPEED.get(state, self._state)
-        self.async_schedule_update_ha_state()
+    @property
+    def speed_range(self) -> tuple[int, int]:
+        """Return the range of speeds the fan supports. Off is not included."""
+        return self._zha_state.speed_range
 
-    async def async_turn_on(self, speed: str = None, **kwargs) -> None:
+    @property
+    @override
+    def speed_count(self) -> int:
+        """Return the number of speeds the fan supports."""
+        return self._zha_state.speed_count
+
+    @convert_zha_error_to_ha_error()
+    @override
+    async def async_turn_on(
+        self,
+        percentage: int | None = None,
+        preset_mode: str | None = None,
+        **kwargs: Any,
+    ) -> None:
         """Turn the entity on."""
-        if speed is None:
-            speed = SPEED_MEDIUM
+        await self.entity_data.entity.async_turn_on(
+            percentage=percentage, preset_mode=preset_mode
+        )
+        self.async_write_ha_state()
 
-        await self.async_set_speed(speed)
-
-    async def async_turn_off(self, **kwargs) -> None:
+    @convert_zha_error_to_ha_error()
+    @override
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the entity off."""
-        await self.async_set_speed(SPEED_OFF)
+        await self.entity_data.entity.async_turn_off()
+        self.async_write_ha_state()
 
-    async def async_set_speed(self, speed: str) -> None:
-        """Set the speed of the fan."""
-        await self._fan_channel.async_set_speed(SPEED_TO_VALUE[speed])
-        self.async_set_state(speed)
+    @convert_zha_error_to_ha_error()
+    @override
+    async def async_set_percentage(self, percentage: int) -> None:
+        """Set the speed percentage of the fan."""
+        await self.entity_data.entity.async_set_percentage(percentage=percentage)
+        self.async_write_ha_state()
 
-    async def async_update(self):
-        """Attempt to retrieve on off state from the fan."""
-        await super().async_update()
-        if self._fan_channel:
-            state = await self._fan_channel.get_attribute_value('fan_mode')
-            if state is not None:
-                self._state = VALUE_TO_SPEED.get(state, self._state)
+    @convert_zha_error_to_ha_error()
+    @override
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        """Set the preset mode for the fan."""
+        await self.entity_data.entity.async_set_preset_mode(preset_mode=preset_mode)
+        self.async_write_ha_state()
+
+    @property
+    @override
+    def percentage(self) -> int | None:
+        """Return the current speed percentage."""
+        return self._zha_state.percentage

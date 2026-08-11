@@ -1,27 +1,15 @@
-"""
-Provide a mock switch platform.
+"""Stub switch platform for translation tests."""
 
-Call init before using it in your tests to ensure clean test data.
-"""
-from homeassistant.const import STATE_ON, STATE_OFF
-from tests.common import MockToggleDevice
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 
-DEVICES = []
-
-
-def init(empty=False):
-    """Initialize the platform with devices."""
-    global DEVICES
-
-    DEVICES = [] if empty else [
-        MockToggleDevice('AC', STATE_ON),
-        MockToggleDevice('AC', STATE_OFF),
-        MockToggleDevice(None, STATE_OFF)
-    ]
-
-
-async def async_setup_platform(hass, config, async_add_entities_callback,
-                               discovery_info=None):
-    """Find and return test switches."""
-    async_add_entities_callback(DEVICES)
+async def async_setup_platform(
+    hass: HomeAssistant,
+    config: ConfigType,
+    async_add_entities_callback: AddEntitiesCallback,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> None:
+    """Stub setup for translation tests."""
+    async_add_entities_callback([])

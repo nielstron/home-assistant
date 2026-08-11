@@ -1,176 +1,96 @@
 """Arcam component."""
-import logging
+
 import asyncio
+from asyncio import timeout
+from contextlib import AsyncExitStack
+import logging
 
-import voluptuous as vol
-import async_timeout
-from arcam.fmj.client import Client
 from arcam.fmj import ConnectionFailed
+from arcam.fmj.client import Client
 
-from homeassistant import config_entries
-import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.typing import HomeAssistantType, ConfigType
-from homeassistant.const import (
-    EVENT_HOMEASSISTANT_STOP,
-    CONF_HOST,
-    CONF_NAME,
-    CONF_PORT,
-    CONF_SCAN_INTERVAL,
-    CONF_ZONE,
-    SERVICE_TURN_ON,
-)
-from .const import (
-    DOMAIN,
-    DOMAIN_DATA_ENTRIES,
-    DOMAIN_DATA_CONFIG,
-    DEFAULT_NAME,
-    DEFAULT_PORT,
-    DEFAULT_SCAN_INTERVAL,
-    SIGNAL_CLIENT_DATA,
-    SIGNAL_CLIENT_STARTED,
-    SIGNAL_CLIENT_STOPPED,
-)
+from homeassistant.const import CONF_HOST, CONF_PORT, Platform
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+
+from .const import DEFAULT_SCAN_INTERVAL
+from .coordinator import ArcamFmjConfigEntry, ArcamFmjCoordinator, ArcamFmjRuntimeData
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def _optional_zone(value):
-    if value:
-        return ZONE_SCHEMA(value)
-    return ZONE_SCHEMA({})
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.MEDIA_PLAYER, Platform.SENSOR]
 
 
-def _zone_name_validator(config):
-    for zone, zone_config in config[CONF_ZONE].items():
-        if CONF_NAME not in zone_config:
-            zone_config[CONF_NAME] = "{} ({}:{}) - {}".format(
-                DEFAULT_NAME,
-                config[CONF_HOST],
-                config[CONF_PORT],
-                zone)
-    return config
-
-
-ZONE_SCHEMA = vol.Schema(
-    {
-        vol.Optional(CONF_NAME): cv.string,
-        vol.Optional(SERVICE_TURN_ON): cv.SERVICE_SCHEMA,
-    }
-)
-
-DEVICE_SCHEMA = vol.Schema(
-    vol.All({
-        vol.Required(CONF_HOST): cv.string,
-        vol.Required(CONF_PORT, default=DEFAULT_PORT): cv.positive_int,
-        vol.Optional(
-            CONF_ZONE, default={1: _optional_zone(None)}
-        ): {vol.In([1, 2]): _optional_zone},
-        vol.Optional(
-            CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL
-        ): cv.positive_int,
-    }, _zone_name_validator)
-)
-
-CONFIG_SCHEMA = vol.Schema(
-    {DOMAIN: vol.All(cv.ensure_list, [DEVICE_SCHEMA])}, extra=vol.ALLOW_EXTRA
-)
-
-
-async def async_setup(hass: HomeAssistantType, config: ConfigType):
-    """Set up the component."""
-    hass.data[DOMAIN_DATA_ENTRIES] = {}
-    hass.data[DOMAIN_DATA_CONFIG] = {}
-
-    for device in config[DOMAIN]:
-        hass.data[DOMAIN_DATA_CONFIG][
-            (device[CONF_HOST], device[CONF_PORT])
-        ] = device
-
-        hass.async_create_task(
-            hass.config_entries.flow.async_init(
-                DOMAIN,
-                context={"source": config_entries.SOURCE_IMPORT},
-                data={
-                    CONF_HOST: device[CONF_HOST],
-                    CONF_PORT: device[CONF_PORT],
-                },
-            )
-        )
-
-    return True
-
-
-async def async_setup_entry(
-        hass: HomeAssistantType, entry: config_entries.ConfigEntry
-):
-    """Set up an access point from a config entry."""
+async def async_setup_entry(hass: HomeAssistant, entry: ArcamFmjConfigEntry) -> bool:
+    """Set up config entry."""
     client = Client(entry.data[CONF_HOST], entry.data[CONF_PORT])
 
-    config = hass.data[DOMAIN_DATA_CONFIG].get(
-        (entry.data[CONF_HOST], entry.data[CONF_PORT]),
-        DEVICE_SCHEMA(
-            {
-                CONF_HOST: entry.data[CONF_HOST],
-                CONF_PORT: entry.data[CONF_PORT],
-            }
-        ),
+    coordinators: dict[int, ArcamFmjCoordinator] = {}
+    for zone in (1, 2):
+        coordinator = ArcamFmjCoordinator(hass, entry, client, zone)
+        coordinators[zone] = coordinator
+
+    # Register the zone 1 device before forwarding platforms so the other zones'
+    # entities can link to it via via_device_id.
+    device_registry = dr.async_get(hass)
+    zone1_device = device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        **coordinators[1].device_info,
+    )
+    for zone, coordinator in coordinators.items():
+        if zone != 1:
+            coordinator.device_info["via_device_id"] = zone1_device.id
+
+    entry.runtime_data = ArcamFmjRuntimeData(client, coordinators)
+
+    entry.async_create_background_task(
+        hass,
+        _run_client(hass, entry.runtime_data, DEFAULT_SCAN_INTERVAL),
+        "arcam_fmj",
     )
 
-    hass.data[DOMAIN_DATA_ENTRIES][entry.entry_id] = {
-        "client": client,
-        "config": config,
-    }
-
-    asyncio.ensure_future(
-        _run_client(hass, client, config[CONF_SCAN_INTERVAL])
-    )
-
-    hass.async_create_task(
-        hass.config_entries.async_forward_entry_setup(entry, "media_player")
-    )
-
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
-async def _run_client(hass, client, interval):
-    task = asyncio.Task.current_task()
-    run = True
+async def async_unload_entry(hass: HomeAssistant, entry: ArcamFmjConfigEntry) -> bool:
+    """Cleanup before removing config entry."""
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
-    async def _stop(_):
-        nonlocal run
-        run = False
-        task.cancel()
-        await task
 
-    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop)
+async def _run_client(
+    hass: HomeAssistant,
+    runtime_data: ArcamFmjRuntimeData,
+    interval: float,
+) -> None:
+    client = runtime_data.client
+    coordinators = runtime_data.coordinators
 
-    def _listen(_):
-        hass.helpers.dispatcher.async_dispatcher_send(
-            SIGNAL_CLIENT_DATA, client.host
-        )
-
-    while run:
+    while True:
         try:
-            with async_timeout.timeout(interval):
-                await client.start()
+            async with AsyncExitStack() as stack:
+                async with timeout(interval):
+                    await client.start()
+                stack.push_async_callback(client.stop)
 
-            _LOGGER.debug("Client connected %s", client.host)
-            hass.helpers.dispatcher.async_dispatcher_send(
-                SIGNAL_CLIENT_STARTED, client.host
-            )
+                _LOGGER.debug("Client connected %s", client.host)
 
-            try:
-                with client.listen(_listen):
+                try:
+                    for coordinator in coordinators.values():
+                        await stack.enter_async_context(
+                            coordinator.async_monitor_client()
+                        )
+
                     await client.process()
-            finally:
-                await client.stop()
-
-                _LOGGER.debug("Client disconnected %s", client.host)
-                hass.helpers.dispatcher.async_dispatcher_send(
-                    SIGNAL_CLIENT_STOPPED, client.host
-                )
+                finally:
+                    _LOGGER.debug("Client disconnected %s", client.host)
 
         except ConnectionFailed:
-            await asyncio.sleep(interval)
-        except asyncio.TimeoutError:
+            pass
+        except TimeoutError:
             continue
+        except Exception:
+            _LOGGER.exception("Unexpected exception, aborting arcam client")
+            return
+
+        await asyncio.sleep(interval)

@@ -1,10 +1,8 @@
 {
   "domain": "fan",
   "name": "Fan",
-  "documentation": "https://www.home-assistant.io/components/fan",
-  "requirements": [],
-  "dependencies": [
-    "group"
-  ],
-  "codeowners": []
+  "codeowners": ["@home-assistant/core"],
+  "documentation": "https://www.home-assistant.io/integrations/fan",
+  "integration_type": "entity",
+  "quality_scale": "internal"
 }

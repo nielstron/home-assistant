@@ -1,86 +1,108 @@
-"""Support for FRITZ!Box routers."""
-import logging
+"""Support for FRITZ!Box devices."""
 
-import voluptuous as vol
+import datetime
+from typing import override
 
-import homeassistant.helpers.config_validation as cv
-from homeassistant.components.device_tracker import (
-    DOMAIN, PLATFORM_SCHEMA, DeviceScanner)
-from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
+from homeassistant.components.device_tracker import ScannerEntity
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-_LOGGER = logging.getLogger(__name__)
+from .const import DEFAULT_DEVICE_NAME, LOGGER
+from .coordinator import FRITZ_DATA_KEY, AvmWrapper, FritzConfigEntry, FritzData
+from .entity import FritzDeviceBase
+from .helpers import device_filter_out_from_trackers
+from .models import FritzDevice
 
-CONF_DEFAULT_IP = '169.254.1.1'  # This IP is valid for all FRITZ!Box routers.
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Optional(CONF_HOST, default=CONF_DEFAULT_IP): cv.string,
-    vol.Optional(CONF_PASSWORD, default='admin'): cv.string,
-    vol.Optional(CONF_USERNAME, default=''): cv.string
-})
-
-
-def get_scanner(hass, config):
-    """Validate the configuration and return FritzBoxScanner."""
-    scanner = FritzBoxScanner(config[DOMAIN])
-    return scanner if scanner.success_init else None
+# Coordinator is used to centralize the data updates
+PARALLEL_UPDATES = 0
 
 
-class FritzBoxScanner(DeviceScanner):
-    """This class queries a FRITZ!Box router."""
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: FritzConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up device tracker for FRITZ!Box component."""
+    LOGGER.debug("Starting FRITZ!Box device tracker")
+    avm_wrapper = entry.runtime_data
+    data_fritz = hass.data[FRITZ_DATA_KEY]
 
-    def __init__(self, config):
-        """Initialize the scanner."""
-        self.last_results = []
-        self.host = config[CONF_HOST]
-        self.username = config[CONF_USERNAME]
-        self.password = config[CONF_PASSWORD]
-        self.success_init = True
+    @callback
+    def update_avm_device() -> None:
+        """Update the values of AVM device."""
+        _async_add_entities(avm_wrapper, async_add_entities, data_fritz)
 
-        import fritzconnection as fc  # pylint: disable=import-error
+    entry.async_on_unload(
+        async_dispatcher_connect(hass, avm_wrapper.signal_device_new, update_avm_device)
+    )
 
-        # Establish a connection to the FRITZ!Box.
-        try:
-            self.fritz_box = fc.FritzHosts(
-                address=self.host, user=self.username, password=self.password)
-        except (ValueError, TypeError):
-            self.fritz_box = None
+    update_avm_device()
 
-        # At this point it is difficult to tell if a connection is established.
-        # So just check for null objects.
-        if self.fritz_box is None or not self.fritz_box.modelname:
-            self.success_init = False
 
-        if self.success_init:
-            _LOGGER.info("Successfully connected to %s",
-                         self.fritz_box.modelname)
-            self._update_info()
-        else:
-            _LOGGER.error("Failed to establish connection to FRITZ!Box "
-                          "with IP: %s", self.host)
+@callback
+def _async_add_entities(
+    avm_wrapper: AvmWrapper,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+    data_fritz: FritzData,
+) -> None:
+    """Add new tracker entities from the AVM device."""
 
-    def scan_devices(self):
-        """Scan for new devices and return a list of found device ids."""
-        self._update_info()
-        active_hosts = []
-        for known_host in self.last_results:
-            if known_host['status'] == '1' and known_host.get('mac'):
-                active_hosts.append(known_host['mac'])
-        return active_hosts
+    new_tracked = []
+    for mac, device in avm_wrapper.devices.items():
+        if device_filter_out_from_trackers(mac, device, data_fritz.tracked.values()):
+            continue
 
-    def get_device_name(self, device):
-        """Return the name of the given device or None if is not known."""
-        ret = self.fritz_box.get_specific_host_entry(device).get(
-            'NewHostName'
-        )
-        if ret == {}:
-            return None
-        return ret
+        new_tracked.append(FritzBoxTracker(avm_wrapper, device))
+        data_fritz.tracked[avm_wrapper.unique_id].add(mac)
 
-    def _update_info(self):
-        """Retrieve latest information from the FRITZ!Box."""
-        if not self.success_init:
-            return False
+    async_add_entities(new_tracked)
 
-        _LOGGER.info("Scanning")
-        self.last_results = self.fritz_box.get_hosts_info()
-        return True
+
+class FritzBoxTracker(FritzDeviceBase, ScannerEntity):
+    """Class which queries a FRITZ!Box device."""
+
+    _attr_translation_key = "device_tracker"
+
+    def __init__(self, avm_wrapper: AvmWrapper, device: FritzDevice) -> None:
+        """Initialize a FRITZ!Box device."""
+        super().__init__(avm_wrapper, device)
+        self._attr_name: str = device.hostname or DEFAULT_DEVICE_NAME
+        self._last_activity: datetime.datetime | None = device.last_activity
+
+    @property
+    @override
+    def is_connected(self) -> bool:
+        """Return device status."""
+        return self._avm_wrapper.devices[self._mac].is_connected
+
+    @property
+    @override
+    def unique_id(self) -> str:
+        """Return device unique id."""
+        return f"{self._mac}_tracker"
+
+    @property
+    @override
+    def mac_address(self) -> str:
+        """Return mac_address."""
+        return self._mac
+
+    @property
+    @override
+    def extra_state_attributes(self) -> dict[str, str]:
+        """Return the attributes."""
+        attrs: dict[str, str] = {}
+        device = self._avm_wrapper.devices[self._mac]
+        self._last_activity = device.last_activity
+        if self._last_activity is not None:
+            attrs["last_time_reachable"] = self._last_activity.isoformat(
+                timespec="seconds"
+            )
+        if device.connected_to:
+            attrs["connected_to"] = device.connected_to
+        if device.connection_type:
+            attrs["connection_type"] = device.connection_type
+        if device.ssid:
+            attrs["ssid"] = device.ssid
+        return attrs

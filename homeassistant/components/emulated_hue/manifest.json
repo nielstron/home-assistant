@@ -1,10 +1,10 @@
 {
   "domain": "emulated_hue",
-  "name": "Emulated hue",
-  "documentation": "https://www.home-assistant.io/components/emulated_hue",
-  "requirements": [
-    "aiohttp_cors==0.7.0"
-  ],
-  "dependencies": [],
-  "codeowners": []
+  "name": "Emulated Hue",
+  "after_dependencies": ["http"],
+  "codeowners": ["@bdraco", "@Tho85"],
+  "dependencies": ["network"],
+  "documentation": "https://www.home-assistant.io/integrations/emulated_hue",
+  "iot_class": "local_push",
+  "quality_scale": "internal"
 }

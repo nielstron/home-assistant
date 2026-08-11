@@ -1,97 +1,244 @@
 """Support for deCONZ binary sensors."""
-from pydeconz.sensor import Presence, Vibration
 
-from homeassistant.components.binary_sensor import BinarySensorDevice
-from homeassistant.const import ATTR_BATTERY_LEVEL, ATTR_TEMPERATURE
-from homeassistant.core import callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import override
 
-from .const import ATTR_DARK, ATTR_ON, NEW_SENSOR
-from .deconz_device import DeconzDevice
-from .gateway import get_gateway_from_config_entry
+from pydeconz.interfaces.sensors import SensorResources
+from pydeconz.models.event import EventType
+from pydeconz.models.sensor import SensorBase as PydeconzSensorBase
+from pydeconz.models.sensor.alarm import Alarm
+from pydeconz.models.sensor.carbon_monoxide import CarbonMonoxide
+from pydeconz.models.sensor.fire import Fire
+from pydeconz.models.sensor.generic_flag import GenericFlag
+from pydeconz.models.sensor.open_close import OpenClose
+from pydeconz.models.sensor.presence import Presence
+from pydeconz.models.sensor.vibration import Vibration
+from pydeconz.models.sensor.water import Water
 
-ATTR_ORIENTATION = 'orientation'
-ATTR_TILTANGLE = 'tiltangle'
-ATTR_VIBRATIONSTRENGTH = 'vibrationstrength'
+from homeassistant.components.binary_sensor import (
+    DOMAIN as BINARY_SENSOR_DOMAIN,
+    BinarySensorDeviceClass,
+    BinarySensorEntity,
+    BinarySensorEntityDescription,
+)
+from homeassistant.const import ATTR_TEMPERATURE, EntityCategory
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+
+from . import DeconzConfigEntry
+from .const import ATTR_DARK, ATTR_ON
+from .entity import DeconzDevice
+from .hub import DeconzHub
+
+ATTR_ORIENTATION = "orientation"
+ATTR_TILTANGLE = "tiltangle"
+ATTR_VIBRATIONSTRENGTH = "vibrationstrength"
+
+PROVIDES_EXTRA_ATTRIBUTES = (
+    "alarm",
+    "carbon_monoxide",
+    "fire",
+    "flag",
+    "open",
+    "presence",
+    "vibration",
+    "water",
+)
 
 
-async def async_setup_platform(
-        hass, config, async_add_entities, discovery_info=None):
-    """Old way of setting up deCONZ platforms."""
-    pass
+@dataclass(frozen=True, kw_only=True)
+class DeconzBinarySensorDescription[
+    _T: (
+        Alarm,
+        CarbonMonoxide,
+        Fire,
+        GenericFlag,
+        OpenClose,
+        Presence,
+        Vibration,
+        Water,
+        PydeconzSensorBase,
+    )
+](BinarySensorEntityDescription):
+    """Class describing deCONZ binary sensor entities."""
+
+    instance_check: type[_T] | None = None
+    name_suffix: str = ""
+    old_unique_id_suffix: str = ""
+    update_key: str
+    value_fn: Callable[[_T], bool | None]
 
 
-async def async_setup_entry(hass, config_entry, async_add_entities):
+ENTITY_DESCRIPTIONS: tuple[DeconzBinarySensorDescription, ...] = (
+    DeconzBinarySensorDescription[Alarm](
+        key="alarm",
+        update_key="alarm",
+        value_fn=lambda device: device.alarm,
+        instance_check=Alarm,
+        device_class=BinarySensorDeviceClass.SAFETY,
+    ),
+    DeconzBinarySensorDescription[CarbonMonoxide](
+        key="carbon_monoxide",
+        update_key="carbonmonoxide",
+        value_fn=lambda device: device.carbon_monoxide,
+        instance_check=CarbonMonoxide,
+        device_class=BinarySensorDeviceClass.CO,
+    ),
+    DeconzBinarySensorDescription[Fire](
+        key="fire",
+        update_key="fire",
+        value_fn=lambda device: device.fire,
+        instance_check=Fire,
+        device_class=BinarySensorDeviceClass.SMOKE,
+    ),
+    DeconzBinarySensorDescription[Fire](
+        key="in_test_mode",
+        update_key="test",
+        value_fn=lambda device: device.in_test_mode,
+        instance_check=Fire,
+        name_suffix="Test Mode",
+        old_unique_id_suffix="test mode",
+        device_class=BinarySensorDeviceClass.SMOKE,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    DeconzBinarySensorDescription[GenericFlag](
+        key="flag",
+        update_key="flag",
+        value_fn=lambda device: device.flag,
+        instance_check=GenericFlag,
+    ),
+    DeconzBinarySensorDescription[OpenClose](
+        key="open",
+        update_key="open",
+        value_fn=lambda device: device.open,
+        instance_check=OpenClose,
+        device_class=BinarySensorDeviceClass.OPENING,
+    ),
+    DeconzBinarySensorDescription[Presence](
+        key="presence",
+        update_key="presence",
+        value_fn=lambda device: device.presence,
+        instance_check=Presence,
+        device_class=BinarySensorDeviceClass.MOTION,
+    ),
+    DeconzBinarySensorDescription[Vibration](
+        key="vibration",
+        update_key="vibration",
+        value_fn=lambda device: device.vibration,
+        instance_check=Vibration,
+        device_class=BinarySensorDeviceClass.VIBRATION,
+    ),
+    DeconzBinarySensorDescription[Water](
+        key="water",
+        update_key="water",
+        value_fn=lambda device: device.water,
+        instance_check=Water,
+        device_class=BinarySensorDeviceClass.MOISTURE,
+    ),
+    DeconzBinarySensorDescription[SensorResources](
+        key="tampered",
+        update_key="tampered",
+        value_fn=lambda device: device.tampered,
+        name_suffix="Tampered",
+        old_unique_id_suffix="tampered",
+        device_class=BinarySensorDeviceClass.TAMPER,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    DeconzBinarySensorDescription[SensorResources](
+        key="low_battery",
+        update_key="lowbattery",
+        value_fn=lambda device: device.low_battery,
+        name_suffix="Low Battery",
+        old_unique_id_suffix="low battery",
+        device_class=BinarySensorDeviceClass.BATTERY,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+)
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: DeconzConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     """Set up the deCONZ binary sensor."""
-    gateway = get_gateway_from_config_entry(hass, config_entry)
+    hub = config_entry.runtime_data
+    hub.entities[BINARY_SENSOR_DOMAIN] = set()
 
     @callback
-    def async_add_sensor(sensors):
-        """Add binary sensor from deCONZ."""
-        entities = []
+    def async_add_sensor(_: EventType, sensor_id: str) -> None:
+        """Add sensor from deCONZ."""
+        sensor = hub.api.sensors[sensor_id]
 
-        for sensor in sensors:
+        for description in ENTITY_DESCRIPTIONS:
+            if (
+                description.instance_check
+                and not isinstance(sensor, description.instance_check)
+            ) or description.value_fn(sensor) is None:
+                continue
+            async_add_entities([DeconzBinarySensor(sensor, hub, description)])
 
-            if sensor.BINARY and \
-               not (not gateway.allow_clip_sensor and
-                    sensor.type.startswith('CLIP')):
-
-                entities.append(DeconzBinarySensor(sensor, gateway))
-
-        async_add_entities(entities, True)
-
-    gateway.listeners.append(async_dispatcher_connect(
-        hass, gateway.async_event_new_device(NEW_SENSOR), async_add_sensor))
-
-    async_add_sensor(gateway.api.sensors.values())
+    hub.register_platform_add_device_callback(
+        async_add_sensor,
+        hub.api.sensors,
+    )
 
 
-class DeconzBinarySensor(DeconzDevice, BinarySensorDevice):
+class DeconzBinarySensor(DeconzDevice[SensorResources], BinarySensorEntity):
     """Representation of a deCONZ binary sensor."""
 
-    @callback
-    def async_update_callback(self, force_update=False):
-        """Update the sensor's state."""
-        changed = set(self._device.changed_keys)
-        keys = {'battery', 'on', 'reachable', 'state'}
-        if force_update or any(key in changed for key in keys):
-            self.async_schedule_update_ha_state()
+    TYPE = BINARY_SENSOR_DOMAIN
+    entity_description: DeconzBinarySensorDescription
+
+    def __init__(
+        self,
+        device: SensorResources,
+        hub: DeconzHub,
+        description: DeconzBinarySensorDescription,
+    ) -> None:
+        """Initialize deCONZ binary sensor."""
+        self.entity_description = description
+        self.unique_id_suffix = description.key
+        self._update_key = description.update_key
+        if description.name_suffix:
+            self._name_suffix = description.name_suffix
+        super().__init__(device, hub)
+
+        if (
+            self.entity_description.key in PROVIDES_EXTRA_ATTRIBUTES
+            and self._update_keys is not None
+        ):
+            self._update_keys.update({"on", "state"})
 
     @property
-    def is_on(self):
-        """Return true if sensor is on."""
-        return self._device.is_tripped
+    @override
+    def is_on(self) -> bool | None:
+        """Return the state of the sensor."""
+        return self.entity_description.value_fn(self._device)
 
     @property
-    def device_class(self):
-        """Return the class of the sensor."""
-        return self._device.SENSOR_CLASS
-
-    @property
-    def icon(self):
-        """Return the icon to use in the frontend."""
-        return self._device.SENSOR_ICON
-
-    @property
-    def device_state_attributes(self):
+    @override
+    def extra_state_attributes(self) -> dict[str, bool | float | int | list | None]:
         """Return the state attributes of the sensor."""
-        attr = {}
-        if self._device.battery:
-            attr[ATTR_BATTERY_LEVEL] = self._device.battery
+        attr: dict[str, bool | float | int | list | None] = {}
+
+        if self.entity_description.key not in PROVIDES_EXTRA_ATTRIBUTES:
+            return attr
 
         if self._device.on is not None:
             attr[ATTR_ON] = self._device.on
 
-        if self._device.secondary_temperature is not None:
-            attr[ATTR_TEMPERATURE] = self._device.secondary_temperature
+        if self._device.internal_temperature is not None:
+            attr[ATTR_TEMPERATURE] = self._device.internal_temperature
 
-        if self._device.type in Presence.ZHATYPE and \
-                self._device.dark is not None:
-            attr[ATTR_DARK] = self._device.dark
+        if isinstance(self._device, Presence):
+            if self._device.dark is not None:
+                attr[ATTR_DARK] = self._device.dark
 
-        elif self._device.type in Vibration.ZHATYPE:
+        elif isinstance(self._device, Vibration):
             attr[ATTR_ORIENTATION] = self._device.orientation
-            attr[ATTR_TILTANGLE] = self._device.tiltangle
-            attr[ATTR_VIBRATIONSTRENGTH] = self._device.vibrationstrength
+            attr[ATTR_TILTANGLE] = self._device.tilt_angle
+            attr[ATTR_VIBRATIONSTRENGTH] = self._device.vibration_strength
 
         return attr

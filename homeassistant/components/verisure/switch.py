@@ -1,73 +1,102 @@
 """Support for Verisure Smartplugs."""
-import logging
-from time import time
 
-from homeassistant.components.switch import SwitchDevice
+from time import monotonic
+from typing import Any, override
 
-from . import CONF_SMARTPLUGS, HUB as hub
+from homeassistant.components.switch import SwitchEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-_LOGGER = logging.getLogger(__name__)
-
-
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up the Verisure switch platform."""
-    if not int(hub.config.get(CONF_SMARTPLUGS, 1)):
-        return False
-
-    hub.update_overview()
-    switches = []
-    switches.extend([
-        VerisureSmartplug(device_label)
-        for device_label in hub.get('$.smartPlugs[*].deviceLabel')])
-    add_entities(switches)
+from .const import CONF_GIID, DOMAIN
+from .coordinator import VerisureConfigEntry, VerisureDataUpdateCoordinator
 
 
-class VerisureSmartplug(SwitchDevice):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: VerisureConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up Verisure alarm control panel from a config entry."""
+    coordinator = entry.runtime_data
+    async_add_entities(
+        VerisureSmartplug(coordinator, serial_number)
+        for serial_number in coordinator.data["smart_plugs"]
+    )
+
+
+class VerisureSmartplug(CoordinatorEntity[VerisureDataUpdateCoordinator], SwitchEntity):
     """Representation of a Verisure smartplug."""
 
-    def __init__(self, device_id):
+    _attr_has_entity_name = True
+    _attr_name = None
+
+    def __init__(
+        self, coordinator: VerisureDataUpdateCoordinator, serial_number: str
+    ) -> None:
         """Initialize the Verisure device."""
-        self._device_label = device_id
-        self._change_timestamp = 0
+        super().__init__(coordinator)
+        self._attr_unique_id = serial_number
+
+        self.serial_number = serial_number
+        self._change_timestamp: float = 0
         self._state = False
+        area = coordinator.data["smart_plugs"][serial_number]["device"]["area"]
+        self._attr_device_info = DeviceInfo(
+            name=area,
+            manufacturer="Verisure",
+            model="SmartPlug",
+            identifiers={(DOMAIN, serial_number)},
+            via_device_id=dr.async_get_device_id_by_identifier(
+                coordinator.hass,
+                (DOMAIN, coordinator.config_entry.data[CONF_GIID]),
+                config_entry_id=coordinator.config_entry.entry_id,
+            ),
+            configuration_url="https://mypages.verisure.com",
+        )
 
     @property
-    def name(self):
-        """Return the name or location of the smartplug."""
-        return hub.get_first(
-            "$.smartPlugs[?(@.deviceLabel == '%s')].area",
-            self._device_label)
-
-    @property
-    def is_on(self):
+    @override
+    def is_on(self) -> bool:
         """Return true if on."""
-        if time() - self._change_timestamp < 10:
+        if monotonic() - self._change_timestamp < 10:
             return self._state
-        self._state = hub.get_first(
-            "$.smartPlugs[?(@.deviceLabel == '%s')].currentState",
-            self._device_label) == "ON"
+        self._state = (
+            self.coordinator.data["smart_plugs"][self.serial_number]["currentState"]
+            == "ON"
+        )
         return self._state
 
     @property
-    def available(self):
+    @override
+    def available(self) -> bool:
         """Return True if entity is available."""
-        return hub.get_first(
-            "$.smartPlugs[?(@.deviceLabel == '%s')]",
-            self._device_label) is not None
+        return (
+            super().available
+            and self.serial_number in self.coordinator.data["smart_plugs"]
+        )
 
-    def turn_on(self, **kwargs):
-        """Set smartplug status on."""
-        hub.session.set_smartplug_state(self._device_label, True)
-        self._state = True
-        self._change_timestamp = time()
+    @override
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn the smartplug on."""
+        await self.async_set_plug_state(True)
 
-    def turn_off(self, **kwargs):
-        """Set smartplug status off."""
-        hub.session.set_smartplug_state(self._device_label, False)
-        self._state = False
-        self._change_timestamp = time()
+    @override
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn the smartplug off."""
+        await self.async_set_plug_state(False)
 
-    # pylint: disable=no-self-use
-    def update(self):
-        """Get the latest date of the smartplug."""
-        hub.update_overview()
+    async def async_set_plug_state(self, state: bool) -> None:
+        """Set smartplug state."""
+        command: dict[str, str | dict[str, str]] = (
+            self.coordinator.verisure.set_smartplug(self.serial_number, state)
+        )
+        await self.hass.async_add_executor_job(
+            self.coordinator.verisure.request,
+            command,
+        )
+        self._state = state
+        self._change_timestamp = monotonic()
+        self.async_write_ha_state()

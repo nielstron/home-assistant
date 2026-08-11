@@ -1,13 +1,10 @@
 {
   "domain": "aws",
-  "name": "Aws",
-  "documentation": "https://www.home-assistant.io/components/aws",
-  "requirements": [
-    "aiobotocore==0.10.2"
-  ],
-  "dependencies": [],
-  "codeowners": [
-    "@awarecan",
-    "@robbiet480"
-  ]
+  "name": "Amazon Web Services (AWS)",
+  "codeowners": [],
+  "documentation": "https://www.home-assistant.io/integrations/aws",
+  "iot_class": "cloud_push",
+  "loggers": ["aiobotocore", "botocore"],
+  "quality_scale": "legacy",
+  "requirements": ["aiobotocore==3.7.0"]
 }

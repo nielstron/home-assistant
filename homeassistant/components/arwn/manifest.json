@@ -1,10 +1,10 @@
 {
   "domain": "arwn",
-  "name": "Arwn",
-  "documentation": "https://www.home-assistant.io/components/arwn",
-  "requirements": [],
-  "dependencies": [
-    "mqtt"
-  ],
-  "codeowners": []
+  "name": "Ambient Radio Weather Network",
+  "codeowners": [],
+  "dependencies": ["mqtt"],
+  "documentation": "https://www.home-assistant.io/integrations/arwn",
+  "iot_class": "local_push",
+  "quality_scale": "legacy",
+  "requirements": ["arwn-client==0.2.1"]
 }

@@ -1,123 +1,163 @@
 """The tests for the MaryTTS speech platform."""
-import asyncio
-import os
-import shutil
 
-import homeassistant.components.tts as tts
-from homeassistant.setup import setup_component
-from homeassistant.components.media_player.const import (
-    SERVICE_PLAY_MEDIA, DOMAIN as DOMAIN_MP)
+from http import HTTPStatus
+import io
+from pathlib import Path
+from unittest.mock import patch
+import wave
 
-from tests.common import (
-    get_test_home_assistant, assert_setup_component, mock_service)
+import pytest
 
-from tests.components.tts.test_init import mutagen_mock  # noqa
+from homeassistant.components import tts
+from homeassistant.components.media_player import (
+    ATTR_MEDIA_CONTENT_ID,
+    DOMAIN as MP_DOMAIN,
+    SERVICE_PLAY_MEDIA,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.setup import async_setup_component
+
+from tests.common import assert_setup_component, async_mock_service
+from tests.components.tts.common import retrieve_media
+from tests.typing import ClientSessionGenerator
 
 
-class TestTTSMaryTTSPlatform:
-    """Test the speech component."""
+def get_empty_wav() -> bytes:
+    """Get bytes for empty WAV file."""
+    with io.BytesIO() as wav_io:
+        with wave.open(wav_io, "wb") as wav_file:
+            wav_file.setframerate(22050)
+            wav_file.setsampwidth(2)
+            wav_file.setnchannels(1)
 
-    def setup_method(self):
-        """Set up things to be run when tests are started."""
-        self.hass = get_test_home_assistant()
+        return wav_io.getvalue()
 
-        self.url = "http://localhost:59125/process?"
-        self.url_param = {
-            'INPUT_TEXT': 'HomeAssistant',
-            'INPUT_TYPE': 'TEXT',
-            'AUDIO': 'WAVE',
-            'VOICE': 'cmu-slt-hsmm',
-            'OUTPUT_TYPE': 'AUDIO',
-            'LOCALE': 'en_US'
-        }
 
-    def teardown_method(self):
-        """Stop everything that was started."""
-        default_tts = self.hass.config.path(tts.DEFAULT_CACHE_DIR)
-        if os.path.isdir(default_tts):
-            shutil.rmtree(default_tts)
+@pytest.fixture(autouse=True)
+def mock_tts_cache_dir_autouse(mock_tts_cache_dir: Path) -> None:
+    """Mock the TTS cache dir with empty dir."""
 
-        self.hass.stop()
 
-    def test_setup_component(self):
-        """Test setup component."""
-        config = {
-            tts.DOMAIN: {
-                'platform': 'marytts'
-            }
-        }
+async def test_setup_component(hass: HomeAssistant) -> None:
+    """Test setup component."""
+    config = {tts.DOMAIN: {"platform": "marytts"}}
 
-        with assert_setup_component(1, tts.DOMAIN):
-            setup_component(self.hass, tts.DOMAIN, config)
+    with assert_setup_component(1, tts.DOMAIN):
+        await async_setup_component(hass, tts.DOMAIN, config)
+        await hass.async_block_till_done()
 
-    def test_service_say(self, aioclient_mock):
-        """Test service call say."""
-        calls = mock_service(self.hass, DOMAIN_MP, SERVICE_PLAY_MEDIA)
 
-        aioclient_mock.get(
-            self.url, params=self.url_param, status=200, content=b'test')
+async def test_service_say(
+    hass: HomeAssistant, hass_client: ClientSessionGenerator
+) -> None:
+    """Test service call say."""
+    calls = async_mock_service(hass, MP_DOMAIN, SERVICE_PLAY_MEDIA)
 
-        config = {
-            tts.DOMAIN: {
-                'platform': 'marytts',
-            }
-        }
+    config = {tts.DOMAIN: {"platform": "marytts"}}
 
-        with assert_setup_component(1, tts.DOMAIN):
-            setup_component(self.hass, tts.DOMAIN, config)
+    with assert_setup_component(1, tts.DOMAIN):
+        await async_setup_component(hass, tts.DOMAIN, config)
+        await hass.async_block_till_done()
 
-        self.hass.services.call(tts.DOMAIN, 'marytts_say', {
-            tts.ATTR_MESSAGE: "HomeAssistant",
-        })
-        self.hass.block_till_done()
+    with patch(
+        "homeassistant.components.marytts.tts.MaryTTS.speak",
+        return_value=get_empty_wav(),
+    ) as mock_speak:
+        await hass.services.async_call(
+            tts.DOMAIN,
+            "marytts_say",
+            {
+                "entity_id": "media_player.something",
+                tts.ATTR_MESSAGE: "HomeAssistant",
+            },
+            blocking=True,
+        )
 
-        assert len(aioclient_mock.mock_calls) == 1
-        assert len(calls) == 1
+        assert (
+            await retrieve_media(
+                hass, hass_client, calls[0].data[ATTR_MEDIA_CONTENT_ID]
+            )
+            == HTTPStatus.OK
+        )
+        await hass.async_block_till_done(wait_background_tasks=True)
 
-    def test_service_say_timeout(self, aioclient_mock):
-        """Test service call say."""
-        calls = mock_service(self.hass, DOMAIN_MP, SERVICE_PLAY_MEDIA)
+    mock_speak.assert_called_once()
+    mock_speak.assert_called_with("HomeAssistant", {})
 
-        aioclient_mock.get(
-            self.url, params=self.url_param, status=200,
-            exc=asyncio.TimeoutError())
+    assert len(calls) == 1
 
-        config = {
-            tts.DOMAIN: {
-                'platform': 'marytts',
-            }
-        }
 
-        with assert_setup_component(1, tts.DOMAIN):
-            setup_component(self.hass, tts.DOMAIN, config)
+async def test_service_say_with_effect(
+    hass: HomeAssistant, hass_client: ClientSessionGenerator
+) -> None:
+    """Test service call say with effects."""
+    calls = async_mock_service(hass, MP_DOMAIN, SERVICE_PLAY_MEDIA)
 
-        self.hass.services.call(tts.DOMAIN, 'marytts_say', {
-            tts.ATTR_MESSAGE: "HomeAssistant",
-        })
-        self.hass.block_till_done()
+    config = {tts.DOMAIN: {"platform": "marytts", "effect": {"Volume": "amount:2.0;"}}}
 
-        assert len(calls) == 0
-        assert len(aioclient_mock.mock_calls) == 1
+    with assert_setup_component(1, tts.DOMAIN):
+        await async_setup_component(hass, tts.DOMAIN, config)
+        await hass.async_block_till_done()
 
-    def test_service_say_http_error(self, aioclient_mock):
-        """Test service call say."""
-        calls = mock_service(self.hass, DOMAIN_MP, SERVICE_PLAY_MEDIA)
+    with patch(
+        "homeassistant.components.marytts.tts.MaryTTS.speak",
+        return_value=get_empty_wav(),
+    ) as mock_speak:
+        await hass.services.async_call(
+            tts.DOMAIN,
+            "marytts_say",
+            {
+                "entity_id": "media_player.something",
+                tts.ATTR_MESSAGE: "HomeAssistant",
+            },
+            blocking=True,
+        )
 
-        aioclient_mock.get(
-            self.url, params=self.url_param, status=403, content=b'test')
+        assert (
+            await retrieve_media(
+                hass, hass_client, calls[0].data[ATTR_MEDIA_CONTENT_ID]
+            )
+            == HTTPStatus.OK
+        )
+        await hass.async_block_till_done(wait_background_tasks=True)
 
-        config = {
-            tts.DOMAIN: {
-                'platform': 'marytts',
-            }
-        }
+    mock_speak.assert_called_once()
+    mock_speak.assert_called_with("HomeAssistant", {"Volume": "amount:2.0;"})
 
-        with assert_setup_component(1, tts.DOMAIN):
-            setup_component(self.hass, tts.DOMAIN, config)
+    assert len(calls) == 1
 
-        self.hass.services.call(tts.DOMAIN, 'marytts_say', {
-            tts.ATTR_MESSAGE: "HomeAssistant",
-        })
-        self.hass.block_till_done()
 
-        assert len(calls) == 0
+async def test_service_say_http_error(
+    hass: HomeAssistant, hass_client: ClientSessionGenerator
+) -> None:
+    """Test service call say."""
+    calls = async_mock_service(hass, MP_DOMAIN, SERVICE_PLAY_MEDIA)
+
+    config = {tts.DOMAIN: {"platform": "marytts"}}
+
+    with assert_setup_component(1, tts.DOMAIN):
+        await async_setup_component(hass, tts.DOMAIN, config)
+        await hass.async_block_till_done()
+
+    with patch(
+        "homeassistant.components.marytts.tts.MaryTTS.speak",
+        side_effect=Exception(),
+    ) as mock_speak:
+        await hass.services.async_call(
+            tts.DOMAIN,
+            "marytts_say",
+            {
+                "entity_id": "media_player.something",
+                tts.ATTR_MESSAGE: "HomeAssistant",
+            },
+        )
+        await hass.async_block_till_done()
+
+        assert (
+            await retrieve_media(
+                hass, hass_client, calls[0].data[ATTR_MEDIA_CONTENT_ID]
+            )
+            == HTTPStatus.INTERNAL_SERVER_ERROR
+        )
+
+    mock_speak.assert_called_once()

@@ -1,126 +1,191 @@
-"""Support for Plaato Airlock."""
+"""Support for Plaato devices."""
+
+from datetime import timedelta
 import logging
 
 from aiohttp import web
+from pyplaato.models.airlock import PlaatoAirlock
+from pyplaato.plaato import (
+    ATTR_ABV,
+    ATTR_BATCH_VOLUME,
+    ATTR_BPM,
+    ATTR_BUBBLES,
+    ATTR_CO2_VOLUME,
+    ATTR_DEVICE_ID,
+    ATTR_DEVICE_NAME,
+    ATTR_OG,
+    ATTR_SG,
+    ATTR_TEMP,
+    ATTR_TEMP_UNIT,
+    ATTR_VOLUME_UNIT,
+)
 import voluptuous as vol
 
-from homeassistant.components.sensor import DOMAIN as SENSOR
+from homeassistant.components import webhook
+from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
 from homeassistant.const import (
-    CONF_WEBHOOK_ID, HTTP_OK,
-    TEMP_CELSIUS, TEMP_FAHRENHEIT, VOLUME_GALLONS, VOLUME_LITERS)
-import homeassistant.helpers.config_validation as cv
+    CONF_SCAN_INTERVAL,
+    CONF_TOKEN,
+    CONF_WEBHOOK_ID,
+    UnitOfTemperature,
+    UnitOfVolume,
+)
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from .const import DOMAIN
+
+from .const import (
+    CONF_DEVICE_NAME,
+    CONF_DEVICE_TYPE,
+    CONF_USE_WEBHOOK,
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+    PLATFORMS,
+)
+from .coordinator import PlaatoConfigEntry, PlaatoCoordinator, PlaatoData
 
 _LOGGER = logging.getLogger(__name__)
 
-DEPENDENCIES = ['webhook']
 
-PLAATO_DEVICE_SENSORS = 'sensors'
-PLAATO_DEVICE_ATTRS = 'attrs'
+DEPENDENCIES = ["webhook"]
 
-ATTR_DEVICE_ID = 'device_id'
-ATTR_DEVICE_NAME = 'device_name'
-ATTR_TEMP_UNIT = 'temp_unit'
-ATTR_VOLUME_UNIT = 'volume_unit'
-ATTR_BPM = 'bpm'
-ATTR_TEMP = 'temp'
-ATTR_SG = 'sg'
-ATTR_OG = 'og'
-ATTR_BUBBLES = 'bubbles'
-ATTR_ABV = 'abv'
-ATTR_CO2_VOLUME = 'co2_volume'
-ATTR_BATCH_VOLUME = 'batch_volume'
+SENSOR_UPDATE = f"{DOMAIN}_sensor_update"
+SENSOR_DATA_KEY = f"{DOMAIN}.{SENSOR_DOMAIN}"
 
-SENSOR_UPDATE = '{}_sensor_update'.format(DOMAIN)
-SENSOR_DATA_KEY = '{}.{}'.format(DOMAIN, SENSOR)
-
-WEBHOOK_SCHEMA = vol.Schema({
-    vol.Required(ATTR_DEVICE_NAME): cv.string,
-    vol.Required(ATTR_DEVICE_ID): cv.positive_int,
-    vol.Required(ATTR_TEMP_UNIT): vol.Any(TEMP_CELSIUS, TEMP_FAHRENHEIT),
-    vol.Required(ATTR_VOLUME_UNIT): vol.Any(VOLUME_LITERS, VOLUME_GALLONS),
-    vol.Required(ATTR_BPM): cv.positive_int,
-    vol.Required(ATTR_TEMP): vol.Coerce(float),
-    vol.Required(ATTR_SG): vol.Coerce(float),
-    vol.Required(ATTR_OG): vol.Coerce(float),
-    vol.Required(ATTR_ABV): vol.Coerce(float),
-    vol.Required(ATTR_CO2_VOLUME): vol.Coerce(float),
-    vol.Required(ATTR_BATCH_VOLUME): vol.Coerce(float),
-    vol.Required(ATTR_BUBBLES): cv.positive_int,
-}, extra=vol.ALLOW_EXTRA)
+WEBHOOK_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_DEVICE_NAME): cv.string,
+        vol.Required(ATTR_DEVICE_ID): cv.positive_int,
+        vol.Required(ATTR_TEMP_UNIT): vol.In(
+            [UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT]
+        ),
+        vol.Required(ATTR_VOLUME_UNIT): vol.In(
+            [UnitOfVolume.LITERS, UnitOfVolume.GALLONS]
+        ),
+        vol.Required(ATTR_BPM): cv.positive_int,
+        vol.Required(ATTR_TEMP): vol.Coerce(float),
+        vol.Required(ATTR_SG): vol.Coerce(float),
+        vol.Required(ATTR_OG): vol.Coerce(float),
+        vol.Required(ATTR_ABV): vol.Coerce(float),
+        vol.Required(ATTR_CO2_VOLUME): vol.Coerce(float),
+        vol.Required(ATTR_BATCH_VOLUME): vol.Coerce(float),
+        vol.Required(ATTR_BUBBLES): cv.positive_int,
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 
 
-async def async_setup(hass, hass_config):
-    """Set up the Plaato component."""
-    return True
-
-
-async def async_setup_entry(hass, entry):
+async def async_setup_entry(hass: HomeAssistant, entry: PlaatoConfigEntry) -> bool:
     """Configure based on config entry."""
-    if DOMAIN not in hass.data:
-        hass.data[DOMAIN] = {}
+    if entry.data[CONF_USE_WEBHOOK]:
+        async_setup_webhook(hass, entry)
+    else:
+        await async_setup_coordinator(hass, entry)
 
-    webhook_id = entry.data[CONF_WEBHOOK_ID]
-    hass.components.webhook.async_register(
-        DOMAIN, 'Plaato', webhook_id, handle_webhook)
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
-    hass.async_create_task(
-        hass.config_entries.async_forward_entry_setup(entry, SENSOR)
+    await hass.config_entries.async_forward_entry_setups(
+        entry, [platform for platform in PLATFORMS if entry.options.get(platform, True)]
     )
 
     return True
 
 
-async def async_unload_entry(hass, entry):
+@callback
+def async_setup_webhook(hass: HomeAssistant, entry: PlaatoConfigEntry) -> None:
+    """Init webhook based on config entry."""
+    webhook_id = entry.data[CONF_WEBHOOK_ID]
+    device_name = entry.data[CONF_DEVICE_NAME]
+
+    entry.runtime_data = PlaatoData(
+        coordinator=None,
+        device_name=entry.data[CONF_DEVICE_NAME],
+        device_type=entry.data[CONF_DEVICE_TYPE],
+        device_id=None,
+    )
+
+    webhook.async_register(
+        hass, DOMAIN, f"{DOMAIN}.{device_name}", webhook_id, handle_webhook
+    )
+
+
+async def async_setup_coordinator(
+    hass: HomeAssistant, entry: PlaatoConfigEntry
+) -> None:
+    """Init auth token based on config entry."""
+    auth_token = entry.data[CONF_TOKEN]
+    device_type = entry.data[CONF_DEVICE_TYPE]
+
+    if entry.options.get(CONF_SCAN_INTERVAL):
+        update_interval = timedelta(minutes=entry.options[CONF_SCAN_INTERVAL])
+    else:
+        update_interval = timedelta(minutes=DEFAULT_SCAN_INTERVAL)
+
+    coordinator = PlaatoCoordinator(
+        hass, entry, auth_token, device_type, update_interval
+    )
+    await coordinator.async_config_entry_first_refresh()
+
+    entry.runtime_data = PlaatoData(
+        coordinator=coordinator,
+        device_name=entry.data[CONF_DEVICE_NAME],
+        device_type=entry.data[CONF_DEVICE_TYPE],
+        device_id=auth_token,
+    )
+
+    for platform in PLATFORMS:
+        if entry.options.get(platform, True):
+            coordinator.platforms.append(platform)
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: PlaatoConfigEntry) -> bool:
     """Unload a config entry."""
-    hass.components.webhook.async_unregister(entry.data[CONF_WEBHOOK_ID])
-    hass.data[SENSOR_DATA_KEY]()
+    if entry.data[CONF_USE_WEBHOOK]:
+        return await async_unload_webhook(hass, entry)
 
-    await hass.config_entries.async_forward_entry_unload(entry, SENSOR)
-    return True
+    return await async_unload_coordinator(hass, entry)
 
 
-async def handle_webhook(hass, webhook_id, request):
+async def async_unload_webhook(hass: HomeAssistant, entry: PlaatoConfigEntry) -> bool:
+    """Unload webhook based entry."""
+    if entry.data[CONF_WEBHOOK_ID] is not None:
+        webhook.async_unregister(hass, entry.data[CONF_WEBHOOK_ID])
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def async_unload_coordinator(
+    hass: HomeAssistant, entry: PlaatoConfigEntry
+) -> bool:
+    """Unload auth token based entry."""
+    coordinator = entry.runtime_data.coordinator
+    return await hass.config_entries.async_unload_platforms(
+        entry, coordinator.platforms if coordinator else PLATFORMS
+    )
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: PlaatoConfigEntry) -> None:
+    """Handle options update."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def handle_webhook(
+    hass: HomeAssistant, webhook_id: str, request: web.Request
+) -> web.Response | None:
     """Handle incoming webhook from Plaato."""
     try:
         data = WEBHOOK_SCHEMA(await request.json())
     except vol.MultipleInvalid as error:
-        _LOGGER.warning("An error occurred when parsing webhook data <%s>",
-                        error)
-        return
+        _LOGGER.warning("An error occurred when parsing webhook data <%s>", error)
+        return None
 
     device_id = _device_id(data)
+    sensor_data = PlaatoAirlock.from_web_hook(data)
 
-    attrs = {
-        ATTR_DEVICE_NAME: data.get(ATTR_DEVICE_NAME),
-        ATTR_DEVICE_ID: data.get(ATTR_DEVICE_ID),
-        ATTR_TEMP_UNIT: data.get(ATTR_TEMP_UNIT),
-        ATTR_VOLUME_UNIT: data.get(ATTR_VOLUME_UNIT)
-    }
+    async_dispatcher_send(hass, SENSOR_UPDATE, *(device_id, sensor_data))
 
-    sensors = {
-        ATTR_TEMP: data.get(ATTR_TEMP),
-        ATTR_BPM: data.get(ATTR_BPM),
-        ATTR_SG: data.get(ATTR_SG),
-        ATTR_OG: data.get(ATTR_OG),
-        ATTR_ABV: data.get(ATTR_ABV),
-        ATTR_CO2_VOLUME: data.get(ATTR_CO2_VOLUME),
-        ATTR_BATCH_VOLUME: data.get(ATTR_BATCH_VOLUME),
-        ATTR_BUBBLES: data.get(ATTR_BUBBLES)
-    }
-
-    hass.data[DOMAIN][device_id] = {
-        PLAATO_DEVICE_ATTRS: attrs,
-        PLAATO_DEVICE_SENSORS: sensors
-    }
-
-    async_dispatcher_send(hass, SENSOR_UPDATE, device_id)
-
-    return web.Response(
-        text="Saving status for {}".format(device_id), status=HTTP_OK)
+    return web.Response(text=f"Saving status for {device_id}")
 
 
 def _device_id(data):
     """Return name of device sensor."""
-    return "{}_{}".format(data.get(ATTR_DEVICE_NAME), data.get(ATTR_DEVICE_ID))
+    return f"{data.get(ATTR_DEVICE_NAME)}_{data.get(ATTR_DEVICE_ID)}"

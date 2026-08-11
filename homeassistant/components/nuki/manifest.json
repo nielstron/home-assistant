@@ -1,12 +1,17 @@
 {
   "domain": "nuki",
-  "name": "Nuki",
-  "documentation": "https://www.home-assistant.io/components/nuki",
-  "requirements": [
-    "pynuki==1.3.2"
+  "name": "Nuki Bridge",
+  "codeowners": ["@pschmitt", "@pvizeli", "@pree"],
+  "config_flow": true,
+  "dependencies": ["webhook"],
+  "dhcp": [
+    {
+      "hostname": "nuki_bridge_*"
+    }
   ],
-  "dependencies": [],
-  "codeowners": [
-    "@pschmitt"
-  ]
+  "documentation": "https://www.home-assistant.io/integrations/nuki",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "loggers": ["pynuki"],
+  "requirements": ["pynuki==1.6.3"]
 }

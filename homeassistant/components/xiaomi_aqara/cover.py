@@ -1,75 +1,96 @@
 """Support for Xiaomi curtain."""
-import logging
 
-from homeassistant.components.cover import ATTR_POSITION, CoverDevice
+from typing import Any, override
 
-from . import PY_XIAOMI_GATEWAY, XiaomiDevice
+from xiaomi_gateway import XiaomiGateway
 
-_LOGGER = logging.getLogger(__name__)
+from homeassistant.components.cover import ATTR_POSITION, CoverEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-ATTR_CURTAIN_LEVEL = 'curtain_level'
+from . import XiaomiAqaraConfigEntry
+from .entity import XiaomiDevice
 
-DATA_KEY_PROTO_V1 = 'status'
-DATA_KEY_PROTO_V2 = 'curtain_status'
+ATTR_CURTAIN_LEVEL = "curtain_level"
+
+DATA_KEY_PROTO_V1 = "status"
+DATA_KEY_PROTO_V2 = "curtain_status"
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: XiaomiAqaraConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     """Perform the setup for Xiaomi devices."""
-    devices = []
-    for (_, gateway) in hass.data[PY_XIAOMI_GATEWAY].gateways.items():
-        for device in gateway.devices['cover']:
-            model = device['model']
-            if model == 'curtain':
-                if 'proto' not in device or int(device['proto'][0:1]) == 1:
-                    data_key = DATA_KEY_PROTO_V1
-                else:
-                    data_key = DATA_KEY_PROTO_V2
-                devices.append(XiaomiGenericCover(device, "Curtain",
-                                                  data_key, gateway))
-    add_entities(devices)
+    entities = []
+    gateway = config_entry.runtime_data
+    for device in gateway.devices["cover"]:
+        model = device["model"]
+        if model in ("curtain", "curtain.aq2", "curtain.hagl04"):
+            if "proto" not in device or int(device["proto"][0:1]) == 1:
+                data_key = DATA_KEY_PROTO_V1
+            else:
+                data_key = DATA_KEY_PROTO_V2
+            entities.append(
+                XiaomiGenericCover(device, "Curtain", data_key, gateway, config_entry)
+            )
+    async_add_entities(entities)
 
 
-class XiaomiGenericCover(XiaomiDevice, CoverDevice):
+class XiaomiGenericCover(XiaomiDevice, CoverEntity):
     """Representation of a XiaomiGenericCover."""
 
-    def __init__(self, device, name, data_key, xiaomi_hub):
+    def __init__(
+        self,
+        device: dict[str, Any],
+        name: str,
+        data_key: str,
+        xiaomi_hub: XiaomiGateway,
+        config_entry: XiaomiAqaraConfigEntry,
+    ) -> None:
         """Initialize the XiaomiGenericCover."""
         self._data_key = data_key
         self._pos = 0
-        XiaomiDevice.__init__(self, device, name, xiaomi_hub)
+        super().__init__(device, name, xiaomi_hub, config_entry)
 
     @property
-    def current_cover_position(self):
+    @override
+    def current_cover_position(self) -> int:
         """Return the current position of the cover."""
         return self._pos
 
     @property
-    def is_closed(self):
+    @override
+    def is_closed(self) -> bool:
         """Return if the cover is closed."""
         return self.current_cover_position <= 0
 
-    def close_cover(self, **kwargs):
+    @override
+    def close_cover(self, **kwargs: Any) -> None:
         """Close the cover."""
-        self._write_to_hub(self._sid, **{self._data_key: 'close'})
+        self._write_to_hub(self._sid, **{self._data_key: "close"})
 
-    def open_cover(self, **kwargs):
+    @override
+    def open_cover(self, **kwargs: Any) -> None:
         """Open the cover."""
-        self._write_to_hub(self._sid, **{self._data_key: 'open'})
+        self._write_to_hub(self._sid, **{self._data_key: "open"})
 
-    def stop_cover(self, **kwargs):
+    @override
+    def stop_cover(self, **kwargs: Any) -> None:
         """Stop the cover."""
-        self._write_to_hub(self._sid, **{self._data_key: 'stop'})
+        self._write_to_hub(self._sid, **{self._data_key: "stop"})
 
-    def set_cover_position(self, **kwargs):
+    @override
+    def set_cover_position(self, **kwargs: Any) -> None:
         """Move the cover to a specific position."""
         position = kwargs.get(ATTR_POSITION)
         if self._data_key == DATA_KEY_PROTO_V2:
-            self._write_to_hub(
-                self._sid, **{ATTR_CURTAIN_LEVEL: position})
+            self._write_to_hub(self._sid, **{ATTR_CURTAIN_LEVEL: position})
         else:
-            self._write_to_hub(
-                self._sid, **{ATTR_CURTAIN_LEVEL: str(position)})
+            self._write_to_hub(self._sid, **{ATTR_CURTAIN_LEVEL: str(position)})
 
+    @override
     def parse_data(self, data, raw_data):
         """Parse data sent by gateway."""
         if ATTR_CURTAIN_LEVEL in data:

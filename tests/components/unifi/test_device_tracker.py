@@ -1,267 +1,845 @@
-"""The tests for the Unifi WAP device tracker platform."""
-from unittest import mock
-from datetime import datetime, timedelta
+"""The tests for the UniFi Network device tracker platform."""
 
+from datetime import timedelta
+from types import MappingProxyType
+from typing import Any
+from unittest.mock import patch
+
+from aiounifi.models.event import EventKey
+from aiounifi.models.message import MessageKey
+from freezegun.api import FrozenDateTimeFactory, freeze_time
 import pytest
-import voluptuous as vol
+from syrupy.assertion import SnapshotAssertion
 
-import homeassistant.util.dt as dt_util
-from homeassistant.components.device_tracker import DOMAIN
-import homeassistant.components.unifi.device_tracker as unifi
-from homeassistant.const import (CONF_HOST, CONF_USERNAME, CONF_PASSWORD,
-                                 CONF_PLATFORM, CONF_VERIFY_SSL,
-                                 CONF_MONITORED_CONDITIONS)
+from homeassistant.components.device_tracker import DOMAIN as TRACKER_DOMAIN
+from homeassistant.components.unifi.const import (
+    CONF_BLOCK_CLIENT,
+    CONF_CLIENT_SOURCE,
+    CONF_IGNORE_LOCAL_MAC,
+    CONF_IGNORE_WIRED_BUG,
+    CONF_SSID_FILTER,
+    CONF_TRACK_CLIENTS,
+    CONF_TRACK_DEVICES,
+    CONF_TRACK_WIRED_CLIENTS,
+    DEFAULT_DETECTION_TIME,
+    DOMAIN,
+)
+from homeassistant.const import STATE_HOME, STATE_NOT_HOME, STATE_UNAVAILABLE, Platform
+from homeassistant.core import HomeAssistant, State
+from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.util import dt as dt_util
 
-from tests.common import mock_coro
-from asynctest import CoroutineMock
-from aiounifi.clients import Clients
+from .conftest import (
+    ConfigEntryFactoryType,
+    WebsocketMessageMock,
+    WebsocketStateManager,
+)
 
-DEFAULT_DETECTION_TIME = timedelta(seconds=300)
+from tests.common import MockConfigEntry, async_fire_time_changed, snapshot_platform
+
+WIRED_CLIENT_1 = {
+    "hostname": "wd_client_1",
+    "is_wired": True,
+    "last_seen": 1562600145,
+    "mac": "00:00:00:00:00:02",
+}
+
+WIRELESS_CLIENT_1 = {
+    "ap_mac": "00:00:00:00:02:01",
+    "essid": "ssid",
+    "hostname": "ws_client_1",
+    "ip": "10.0.0.1",
+    "is_wired": False,
+    "last_seen": 1562600145,
+    "mac": "00:00:00:00:00:01",
+}
+
+WIRED_BUG_CLIENT = {
+    "essid": "ssid",
+    "hostname": "wd_bug_client",
+    "ip": "10.0.0.3",
+    "is_wired": True,
+    "last_seen": 1562600145,
+    "mac": "00:00:00:00:00:03",
+}
+
+UNSEEN_CLIENT = {
+    "essid": "ssid",
+    "hostname": "unseen_client",
+    "ip": "10.0.0.4",
+    "is_wired": True,
+    "last_seen": None,
+    "mac": "00:00:00:00:00:04",
+}
+
+LOCAL_MAC_CLIENT = {
+    "essid": "ssid",
+    "hostname": "local_mac_client",
+    "ip": "10.0.0.5",
+    "is_wired": False,
+    "last_seen": 1562600145,
+    "mac": "02:00:00:00:00:01",  # U/L bit set in first octet -> locally administered
+}
+
+# Wired locally-administered MAC (e.g. a Docker container) - not a randomized Wi-Fi MAC
+WIRED_LOCAL_MAC_CLIENT = {
+    "hostname": "wired_local_mac_client",
+    "ip": "10.0.0.6",
+    "is_wired": True,
+    "last_seen": 1562600145,
+    "mac": "02:00:00:00:00:02",
+}
+
+SWITCH_1 = {
+    "board_rev": 3,
+    "device_id": "mock-id-1",
+    "has_fan": True,
+    "fan_level": 0,
+    "ip": "10.0.1.1",
+    "last_seen": 1562600145,
+    "mac": "00:00:00:00:01:01",
+    "model": "US16P150",
+    "name": "Switch 1",
+    "next_interval": 20,
+    "overheating": True,
+    "state": 1,
+    "type": "usw",
+    "upgradable": True,
+    "version": "4.0.42.10433",
+}
 
 
-@pytest.fixture
-def mock_ctrl():
-    """Mock pyunifi."""
-    with mock.patch('aiounifi.Controller') as mock_control:
-        mock_control.return_value.login.return_value = mock_coro()
-        mock_control.return_value.initialize.return_value = mock_coro()
-        yield mock_control
+@pytest.mark.parametrize("client_payload", [[WIRED_CLIENT_1, WIRELESS_CLIENT_1]])
+@pytest.mark.parametrize("device_payload", [[SWITCH_1]])
+@pytest.mark.parametrize(
+    "site_payload",
+    [[{"desc": "Site name", "name": "site_id", "role": "not admin", "_id": "1"}]],
+)
+@pytest.mark.usefixtures("mock_device_registry")
+async def test_entity_and_device_data(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    config_entry_factory: ConfigEntryFactoryType,
+    snapshot: SnapshotAssertion,
+) -> None:
+    """Validate entity and device data with and without admin rights."""
+    with patch("homeassistant.components.unifi.PLATFORMS", [Platform.DEVICE_TRACKER]):
+        config_entry = await config_entry_factory()
+    await snapshot_platform(hass, entity_registry, snapshot, config_entry.entry_id)
 
 
-@pytest.fixture
-def mock_scanner():
-    """Mock UnifyScanner."""
-    with mock.patch('homeassistant.components.unifi.device_tracker'
-                    '.UnifiScanner') as scanner:
-        yield scanner
+@pytest.mark.parametrize(
+    "client_payload", [[WIRELESS_CLIENT_1, WIRED_BUG_CLIENT, UNSEEN_CLIENT]]
+)
+@pytest.mark.parametrize("known_wireless_clients", [[WIRED_BUG_CLIENT["mac"]]])
+@pytest.mark.usefixtures("mock_device_registry")
+async def test_client_state_update(
+    hass: HomeAssistant,
+    mock_websocket_message: WebsocketMessageMock,
+    config_entry_factory: ConfigEntryFactoryType,
+    client_payload: list[dict[str, Any]],
+) -> None:
+    """Verify tracking of wireless clients."""
+    # A normal client with current timestamp should have STATE_HOME, this is wired bug
+    client_payload[1] |= {"last_seen": dt_util.as_timestamp(dt_util.utcnow())}
+    await config_entry_factory()
 
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == 3
 
-@mock.patch('os.access', return_value=True)
-@mock.patch('os.path.isfile', mock.Mock(return_value=True))
-async def test_config_valid_verify_ssl(hass, mock_scanner, mock_ctrl):
-    """Test the setup with a string for ssl_verify.
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_NOT_HOME
+    assert (
+        hass.states.get("device_tracker.ws_client_1").attributes["host_name"]
+        == "ws_client_1"
+    )
 
-    Representing the absolute path to a CA certificate bundle.
-    """
-    config = {
-        DOMAIN: unifi.PLATFORM_SCHEMA({
-            CONF_PLATFORM: unifi.DOMAIN,
-            CONF_USERNAME: 'foo',
-            CONF_PASSWORD: 'password',
-            CONF_VERIFY_SSL: "/tmp/unifi.crt"
-        })
+    # Wireless client with wired bug, if bug active on restart mark device away
+    assert hass.states.get("device_tracker.wd_bug_client").state == STATE_NOT_HOME
+
+    # A client that has never been seen should be marked away.
+    assert hass.states.get("device_tracker.unseen_client").state == STATE_NOT_HOME
+
+    # Updated timestamp marks client as home
+    ws_client_1 = client_payload[0] | {
+        "last_seen": dt_util.as_timestamp(dt_util.utcnow())
     }
-    result = await unifi.async_get_scanner(hass, config)
-    assert mock_scanner.return_value == result
-    assert mock_ctrl.call_count == 1
+    mock_websocket_message(message=MessageKey.CLIENT, data=ws_client_1)
+    await hass.async_block_till_done()
 
-    assert mock_scanner.call_count == 1
-    assert mock_scanner.call_args == mock.call(mock_ctrl.return_value,
-                                               DEFAULT_DETECTION_TIME,
-                                               None, None)
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
 
+    # Change time to mark client as away
+    new_time = dt_util.utcnow() + timedelta(seconds=DEFAULT_DETECTION_TIME)
+    with freeze_time(new_time):
+        async_fire_time_changed(hass, new_time)
+        await hass.async_block_till_done()
 
-async def test_config_minimal(hass, mock_scanner, mock_ctrl):
-    """Test the setup with minimal configuration."""
-    config = {
-        DOMAIN: unifi.PLATFORM_SCHEMA({
-            CONF_PLATFORM: unifi.DOMAIN,
-            CONF_USERNAME: 'foo',
-            CONF_PASSWORD: 'password',
-        })
-    }
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_NOT_HOME
 
-    result = await unifi.async_get_scanner(hass, config)
-    assert mock_scanner.return_value == result
-    assert mock_ctrl.call_count == 1
+    # Same timestamp doesn't explicitly mark client as away
+    mock_websocket_message(message=MessageKey.CLIENT, data=ws_client_1)
+    await hass.async_block_till_done()
 
-    assert mock_scanner.call_count == 1
-    assert mock_scanner.call_args == mock.call(mock_ctrl.return_value,
-                                               DEFAULT_DETECTION_TIME,
-                                               None, None)
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
 
 
-async def test_config_full(hass, mock_scanner, mock_ctrl):
-    """Test the setup with full configuration."""
-    config = {
-        DOMAIN: unifi.PLATFORM_SCHEMA({
-            CONF_PLATFORM: unifi.DOMAIN,
-            CONF_USERNAME: 'foo',
-            CONF_PASSWORD: 'password',
-            CONF_HOST: 'myhost',
-            CONF_VERIFY_SSL: False,
-            CONF_MONITORED_CONDITIONS: ['essid', 'signal'],
-            'port': 123,
-            'site_id': 'abcdef01',
-            'detection_time': 300,
-        })
-    }
-    result = await unifi.async_get_scanner(hass, config)
-    assert mock_scanner.return_value == result
-    assert mock_ctrl.call_count == 1
+@pytest.mark.parametrize("client_payload", [[WIRELESS_CLIENT_1]])
+@pytest.mark.usefixtures("config_entry_setup")
+@pytest.mark.usefixtures("mock_device_registry")
+async def test_client_state_from_event_source(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    mock_websocket_message: WebsocketMessageMock,
+    client_payload: list[dict[str, Any]],
+) -> None:
+    """Verify update state of client based on event source."""
 
-    assert mock_scanner.call_count == 1
-    assert mock_scanner.call_args == mock.call(
-        mock_ctrl.return_value,
-        DEFAULT_DETECTION_TIME,
-        None,
-        config[DOMAIN][CONF_MONITORED_CONDITIONS])
-
-
-def test_config_error():
-    """Test for configuration errors."""
-    with pytest.raises(vol.Invalid):
-        unifi.PLATFORM_SCHEMA({
-            # no username
-            CONF_PLATFORM: unifi.DOMAIN,
-            CONF_HOST: 'myhost',
-            'port': 123,
-        })
-    with pytest.raises(vol.Invalid):
-        unifi.PLATFORM_SCHEMA({
-            CONF_PLATFORM: unifi.DOMAIN,
-            CONF_USERNAME: 'foo',
-            CONF_PASSWORD: 'password',
-            CONF_HOST: 'myhost',
-            'port': 'foo',  # bad port!
-        })
-    with pytest.raises(vol.Invalid):
-        unifi.PLATFORM_SCHEMA({
-            CONF_PLATFORM: unifi.DOMAIN,
-            CONF_USERNAME: 'foo',
-            CONF_PASSWORD: 'password',
-            CONF_VERIFY_SSL: "dfdsfsdfsd",  # Invalid ssl_verify (no file)
-        })
-
-
-async def test_config_controller_failed(hass, mock_ctrl, mock_scanner):
-    """Test for controller failure."""
-    config = {
-        'device_tracker': {
-            CONF_PLATFORM: unifi.DOMAIN,
-            CONF_USERNAME: 'foo',
-            CONF_PASSWORD: 'password',
+    async def mock_event(client: dict[str, Any], event_key: EventKey) -> dict[str, Any]:
+        """Create and send event based on client payload."""
+        event = {
+            "user": client["mac"],
+            "ssid": client["essid"],
+            "hostname": client["hostname"],
+            "ap": client["ap_mac"],
+            "duration": 467,
+            "bytes": 459039,
+            "key": event_key,
+            "subsystem": "wlan",
+            "site_id": "name",
+            "time": 1587752927000,
+            "datetime": "2020-04-24T18:28:47Z",
+            "_id": "5ea32ff730c49e00f90dca1a",
         }
+        mock_websocket_message(message=MessageKey.EVENT, data=event)
+        await hass.async_block_till_done()
+
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == 1
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_NOT_HOME
+
+    # State change signalling works with events
+
+    # Connected event
+    await mock_event(client_payload[0], EventKey.WIRELESS_CLIENT_CONNECTED)
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
+
+    # Disconnected event
+    await mock_event(client_payload[0], EventKey.WIRELESS_CLIENT_DISCONNECTED)
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
+
+    # Change time to mark client as away
+    freezer.tick(timedelta(seconds=(DEFAULT_DETECTION_TIME + 1)))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_NOT_HOME
+
+    # To limit false positives in client tracker
+    # data sources are prioritized when available
+    # once real data is received events will be ignored.
+
+    # New data
+    ws_client_1 = client_payload[0] | {
+        "last_seen": dt_util.as_timestamp(dt_util.utcnow())
     }
-    mock_ctrl.side_effect = unifi.CannotConnect
-    result = await unifi.async_get_scanner(hass, config)
-    assert result is False
+    mock_websocket_message(message=MessageKey.CLIENT, data=ws_client_1)
+    await hass.async_block_till_done()
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
+
+    # Disconnection event will be ignored
+    await mock_event(client_payload[0], EventKey.WIRELESS_CLIENT_DISCONNECTED)
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
+
+    # Change time to mark client as away
+    freezer.tick(timedelta(seconds=(DEFAULT_DETECTION_TIME + 1)))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_NOT_HOME
 
 
-async def test_scanner_update():
-    """Test the scanner update."""
-    ctrl = mock.MagicMock()
-    fake_clients = [
-        {'mac': '123', 'essid': 'barnet',
-         'last_seen': dt_util.as_timestamp(dt_util.utcnow())},
-        {'mac': '234', 'essid': 'barnet',
-         'last_seen': dt_util.as_timestamp(dt_util.utcnow())},
+@pytest.mark.parametrize("device_payload", [[SWITCH_1]])
+@pytest.mark.usefixtures("mock_device_registry")
+@pytest.mark.parametrize(
+    ("state", "interval", "expected"),
+    [
+        # Start home, new signal but still home, heartbeat timer triggers away
+        (1, 20, (STATE_HOME, STATE_HOME, STATE_NOT_HOME)),
+        # Start away, new signal but still home, heartbeat time do not trigger
+        (0, 40, (STATE_NOT_HOME, STATE_HOME, STATE_HOME)),
+    ],
+)
+async def test_tracked_device_state_change(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    config_entry_factory: ConfigEntryFactoryType,
+    mock_websocket_message: WebsocketMessageMock,
+    device_payload: list[dict[str, Any]],
+    state: int,
+    interval: int,
+    expected: list[str],
+) -> None:
+    """Test the update_items function with some devices."""
+    device_payload[0] = device_payload[0] | {"state": state}
+    await config_entry_factory()
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == 1
+    assert hass.states.get("device_tracker.switch_1").state == expected[0]
+
+    # State change signalling work
+    switch_1 = device_payload[0] | {"state": 1, "next_interval": interval}
+    mock_websocket_message(message=MessageKey.DEVICE, data=[switch_1])
+    await hass.async_block_till_done()
+
+    # Too little time has passed
+    assert hass.states.get("device_tracker.switch_1").state == expected[1]
+
+    # Change of time can mark device not_home outside of expected reporting interval
+    new_time = dt_util.utcnow() + timedelta(seconds=90)
+    freezer.move_to(new_time)
+    async_fire_time_changed(hass, new_time)
+    await hass.async_block_till_done()
+
+    # Heartbeat to update state is interval + 60 seconds
+    assert hass.states.get("device_tracker.switch_1").state == expected[2]
+
+    # Disabled device is unavailable
+    switch_1["disabled"] = True
+    mock_websocket_message(message=MessageKey.DEVICE, data=switch_1)
+    await hass.async_block_till_done()
+
+    assert hass.states.get("device_tracker.switch_1").state == STATE_UNAVAILABLE
+
+
+@pytest.mark.parametrize("client_payload", [[WIRELESS_CLIENT_1, WIRED_CLIENT_1]])
+@pytest.mark.usefixtures("config_entry_setup")
+@pytest.mark.usefixtures("mock_device_registry")
+async def test_remove_clients(
+    hass: HomeAssistant,
+    mock_websocket_message: WebsocketMessageMock,
+    client_payload: list[dict[str, Any]],
+) -> None:
+    """Test the remove_items function with some clients."""
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == 2
+    assert hass.states.get("device_tracker.ws_client_1")
+    assert hass.states.get("device_tracker.wd_client_1")
+
+    # Remove client
+    mock_websocket_message(message=MessageKey.CLIENT_REMOVED, data=client_payload[0])
+    await hass.async_block_till_done()
+
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == 1
+    assert not hass.states.get("device_tracker.ws_client_1")
+    assert hass.states.get("device_tracker.wd_client_1")
+
+
+@pytest.mark.parametrize("client_payload", [[WIRELESS_CLIENT_1]])
+@pytest.mark.parametrize("device_payload", [[SWITCH_1]])
+@pytest.mark.usefixtures("config_entry_setup")
+@pytest.mark.usefixtures("mock_device_registry")
+async def test_hub_state_change(
+    hass: HomeAssistant,
+    mock_websocket_state: WebsocketStateManager,
+) -> None:
+    """Verify entities state reflect on hub connection becoming unavailable."""
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == 2
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_NOT_HOME
+    assert hass.states.get("device_tracker.switch_1").state == STATE_HOME
+
+    # Controller unavailable
+    await mock_websocket_state.disconnect()
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_UNAVAILABLE
+    assert hass.states.get("device_tracker.switch_1").state == STATE_UNAVAILABLE
+
+    # Controller available
+    await mock_websocket_state.reconnect()
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_NOT_HOME
+    assert hass.states.get("device_tracker.switch_1").state == STATE_HOME
+
+
+@pytest.mark.usefixtures("mock_device_registry")
+async def test_option_ssid_filter(
+    hass: HomeAssistant,
+    mock_websocket_message,
+    config_entry_factory: ConfigEntryFactoryType,
+    client_payload: list[dict[str, Any]],
+) -> None:
+    """Test the SSID filter works.
+
+    Client will travel from a supported SSID to an unsupported ssid.
+    Client on SSID2 will be removed on change of options.
+    """
+    client_payload += [
+        WIRELESS_CLIENT_1 | {"last_seen": dt_util.as_timestamp(dt_util.utcnow())},
+        {
+            "essid": "ssid2",
+            "hostname": "client_on_ssid2",
+            "is_wired": False,
+            "last_seen": 1562600145,
+            "mac": "00:00:00:00:00:02",
+        },
     ]
-    ctrl.clients = Clients([], CoroutineMock(return_value=fake_clients))
-    scnr = unifi.UnifiScanner(ctrl, DEFAULT_DETECTION_TIME, None, None)
-    await scnr.async_update()
-    assert len(scnr._clients) == 2
+    config_entry = await config_entry_factory()
 
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == 2
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
+    assert hass.states.get("device_tracker.client_on_ssid2").state == STATE_NOT_HOME
 
-def test_scanner_update_error():
-    """Test the scanner update for error."""
-    ctrl = mock.MagicMock()
-    ctrl.get_clients.side_effect = unifi.aiounifi.AiounifiException
-    unifi.UnifiScanner(ctrl, DEFAULT_DETECTION_TIME, None, None)
+    # Setting SSID filter will remove clients outside of filter
+    hass.config_entries.async_update_entry(
+        config_entry, options={CONF_SSID_FILTER: ["ssid"]}
+    )
+    await hass.async_block_till_done()
 
+    # Not affected by SSID filter
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
 
-async def test_scan_devices():
-    """Test the scanning for devices."""
-    ctrl = mock.MagicMock()
-    fake_clients = [
-        {'mac': '123', 'essid': 'barnet',
-         'last_seen': dt_util.as_timestamp(dt_util.utcnow())},
-        {'mac': '234', 'essid': 'barnet',
-         'last_seen': dt_util.as_timestamp(dt_util.utcnow())},
-    ]
-    ctrl.clients = Clients([], CoroutineMock(return_value=fake_clients))
-    scnr = unifi.UnifiScanner(ctrl, DEFAULT_DETECTION_TIME, None, None)
-    await scnr.async_update()
-    assert set(await scnr.async_scan_devices()) == set(['123', '234'])
+    # Removed due to SSID filter
+    assert not hass.states.get("device_tracker.client_on_ssid2")
 
+    # Roams to SSID outside of filter
+    ws_client_1 = client_payload[0] | {"essid": "other_ssid"}
+    mock_websocket_message(message=MessageKey.CLIENT, data=ws_client_1)
 
-async def test_scan_devices_filtered():
-    """Test the scanning for devices based on SSID."""
-    ctrl = mock.MagicMock()
-    fake_clients = [
-        {'mac': '123', 'essid': 'foonet',
-         'last_seen': dt_util.as_timestamp(dt_util.utcnow())},
-        {'mac': '234', 'essid': 'foonet',
-         'last_seen': dt_util.as_timestamp(dt_util.utcnow())},
-        {'mac': '567', 'essid': 'notnet',
-         'last_seen': dt_util.as_timestamp(dt_util.utcnow())},
-        {'mac': '890', 'essid': 'barnet',
-         'last_seen': dt_util.as_timestamp(dt_util.utcnow())},
-    ]
-
-    ssid_filter = ['foonet', 'barnet']
-    ctrl.clients = Clients([], CoroutineMock(return_value=fake_clients))
-    scnr = unifi.UnifiScanner(ctrl, DEFAULT_DETECTION_TIME, ssid_filter, None)
-    await scnr.async_update()
-    assert set(await scnr.async_scan_devices()) == set(['123', '234', '890'])
-
-
-async def test_get_device_name():
-    """Test the getting of device names."""
-    ctrl = mock.MagicMock()
-    fake_clients = [
-        {'mac': '123',
-         'hostname': 'foobar',
-         'essid': 'barnet',
-         'last_seen': dt_util.as_timestamp(dt_util.utcnow())},
-        {'mac': '234',
-         'name': 'Nice Name',
-         'essid': 'barnet',
-         'last_seen': dt_util.as_timestamp(dt_util.utcnow())},
-        {'mac': '456',
-         'essid': 'barnet',
-         'last_seen': '1504786810'},
-    ]
-    ctrl.clients = Clients([], CoroutineMock(return_value=fake_clients))
-    scnr = unifi.UnifiScanner(ctrl, DEFAULT_DETECTION_TIME, None, None)
-    await scnr.async_update()
-    assert scnr.get_device_name('123') == 'foobar'
-    assert scnr.get_device_name('234') == 'Nice Name'
-    assert scnr.get_device_name('456') is None
-    assert scnr.get_device_name('unknown') is None
-
-
-async def test_monitored_conditions():
-    """Test the filtering of attributes."""
-    ctrl = mock.MagicMock()
-    fake_clients = [
-        {'mac': '123',
-         'hostname': 'foobar',
-         'essid': 'barnet',
-         'signal': -60,
-         'last_seen': dt_util.as_timestamp(dt_util.utcnow()),
-         'latest_assoc_time': 946684800.0},
-        {'mac': '234',
-         'name': 'Nice Name',
-         'essid': 'barnet',
-         'signal': -42,
-         'last_seen': dt_util.as_timestamp(dt_util.utcnow())},
-        {'mac': '456',
-         'hostname': 'wired',
-         'essid': 'barnet',
-         'last_seen': dt_util.as_timestamp(dt_util.utcnow())},
-    ]
-    ctrl.clients = Clients([], CoroutineMock(return_value=fake_clients))
-    scnr = unifi.UnifiScanner(ctrl, DEFAULT_DETECTION_TIME, None,
-                              ['essid', 'signal', 'latest_assoc_time'])
-    await scnr.async_update()
-    assert scnr.get_extra_attributes('123') == {
-        'essid': 'barnet',
-        'signal': -60,
-        'latest_assoc_time': datetime(2000, 1, 1, 0, 0, tzinfo=dt_util.UTC)
+    # Data update while SSID filter is in effect shouldn't create the client
+    client_on_ssid2 = client_payload[1] | {
+        "last_seen": dt_util.as_timestamp(dt_util.utcnow())
     }
-    assert scnr.get_extra_attributes('234') == {
-        'essid': 'barnet',
-        'signal': -42
+    mock_websocket_message(message=MessageKey.CLIENT, data=client_on_ssid2)
+    await hass.async_block_till_done()
+
+    new_time = dt_util.utcnow() + timedelta(seconds=(DEFAULT_DETECTION_TIME + 1))
+    with freeze_time(new_time):
+        async_fire_time_changed(hass, new_time)
+        await hass.async_block_till_done()
+
+    # SSID filter marks client as away
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_NOT_HOME
+
+    # SSID still outside of filter
+    assert not hass.states.get("device_tracker.client_on_ssid2")
+
+    # Remove SSID filter
+    hass.config_entries.async_update_entry(config_entry, options={CONF_SSID_FILTER: []})
+    await hass.async_block_till_done()
+
+    ws_client_1["last_seen"] += 1
+    client_on_ssid2["last_seen"] += 1
+    mock_websocket_message(
+        message=MessageKey.CLIENT, data=[ws_client_1, client_on_ssid2]
+    )
+    await hass.async_block_till_done()
+
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
+    assert hass.states.get("device_tracker.client_on_ssid2").state == STATE_HOME
+
+    # Time pass to mark client as away
+    new_time += timedelta(seconds=(DEFAULT_DETECTION_TIME + 1))
+    with freeze_time(new_time):
+        async_fire_time_changed(hass, new_time)
+        await hass.async_block_till_done()
+
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_NOT_HOME
+
+    client_on_ssid2["last_seen"] += 1
+    mock_websocket_message(message=MessageKey.CLIENT, data=client_on_ssid2)
+    await hass.async_block_till_done()
+
+    # Client won't go away until after next update
+    assert hass.states.get("device_tracker.client_on_ssid2").state == STATE_HOME
+
+    # Trigger update to get client marked as away
+    client_on_ssid2["last_seen"] += 1
+    mock_websocket_message(message=MessageKey.CLIENT, data=client_on_ssid2)
+    await hass.async_block_till_done()
+
+    new_time += timedelta(seconds=DEFAULT_DETECTION_TIME)
+    with freeze_time(new_time):
+        async_fire_time_changed(hass, new_time)
+        await hass.async_block_till_done()
+
+    assert hass.states.get("device_tracker.client_on_ssid2").state == STATE_NOT_HOME
+
+
+@pytest.mark.usefixtures("mock_device_registry")
+async def test_wireless_client_go_wired_issue(
+    hass: HomeAssistant,
+    mock_websocket_message,
+    config_entry_factory: ConfigEntryFactoryType,
+    client_payload: list[dict[str, Any]],
+) -> None:
+    """Test the solution to catch wireless device go wired UniFi issue.
+
+    UniFi Network has a known issue that when a wireless device goes away
+    it sometimes gets marked as wired.
+    """
+    client_payload.append(
+        WIRELESS_CLIENT_1 | {"last_seen": dt_util.as_timestamp(dt_util.utcnow())}
+    )
+    await config_entry_factory()
+
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == 1
+
+    # Client is wireless
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
+
+    # Trigger wired bug
+    ws_client_1 = client_payload[0] | {
+        "last_seen": dt_util.as_timestamp(dt_util.utcnow()),
+        "is_wired": True,
     }
-    assert scnr.get_extra_attributes('456') == {'essid': 'barnet'}
+    mock_websocket_message(message=MessageKey.CLIENT, data=ws_client_1)
+    await hass.async_block_till_done()
+
+    # Wired bug fix keeps client marked as wireless
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
+
+    # Pass time
+    new_time = dt_util.utcnow() + timedelta(seconds=DEFAULT_DETECTION_TIME)
+    with freeze_time(new_time):
+        async_fire_time_changed(hass, new_time)
+        await hass.async_block_till_done()
+
+    # Marked as home according to the timer
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_NOT_HOME
+
+    # Try to mark client as connected
+    ws_client_1["last_seen"] += 1
+    mock_websocket_message(message=MessageKey.CLIENT, data=ws_client_1)
+    await hass.async_block_till_done()
+
+    # Make sure it don't go online again until wired bug disappears
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_NOT_HOME
+
+    # Make client wireless
+    ws_client_1["last_seen"] += 1
+    ws_client_1["is_wired"] = False
+    mock_websocket_message(message=MessageKey.CLIENT, data=ws_client_1)
+    await hass.async_block_till_done()
+
+    # Client is no longer affected by wired bug and can be marked online
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
+
+
+@pytest.mark.parametrize("config_entry_options", [{CONF_IGNORE_WIRED_BUG: True}])
+@pytest.mark.usefixtures("mock_device_registry")
+async def test_option_ignore_wired_bug(
+    hass: HomeAssistant,
+    mock_websocket_message,
+    config_entry_factory: ConfigEntryFactoryType,
+    client_payload: list[dict[str, Any]],
+) -> None:
+    """Test option to ignore wired bug."""
+    client_payload.append(
+        WIRELESS_CLIENT_1 | {"last_seen": dt_util.as_timestamp(dt_util.utcnow())}
+    )
+    await config_entry_factory()
+
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == 1
+
+    # Client is wireless
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
+
+    # Trigger wired bug
+    ws_client_1 = client_payload[0]
+    ws_client_1["is_wired"] = True
+    mock_websocket_message(message=MessageKey.CLIENT, data=ws_client_1)
+    await hass.async_block_till_done()
+
+    # Wired bug in effect
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
+
+    # Pass time
+    new_time = dt_util.utcnow() + timedelta(seconds=DEFAULT_DETECTION_TIME)
+    with freeze_time(new_time):
+        async_fire_time_changed(hass, new_time)
+        await hass.async_block_till_done()
+
+    # Timer marks client as away
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_NOT_HOME
+
+    # Mark client as connected again
+    ws_client_1["last_seen"] += 1
+    mock_websocket_message(message=MessageKey.CLIENT, data=ws_client_1)
+    await hass.async_block_till_done()
+
+    # Ignoring wired bug allows client to go home again even while affected
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
+
+    # Make client wireless
+    ws_client_1["last_seen"] += 1
+    ws_client_1["is_wired"] = False
+    mock_websocket_message(message=MessageKey.CLIENT, data=ws_client_1)
+    await hass.async_block_till_done()
+
+    # Client is wireless and still connected
+    assert hass.states.get("device_tracker.ws_client_1").state == STATE_HOME
+
+
+@pytest.mark.parametrize("config_entry_options", [{CONF_TRACK_WIRED_CLIENTS: True}])
+@pytest.mark.parametrize(
+    "client_payload", [[WIRELESS_CLIENT_1, LOCAL_MAC_CLIENT, WIRED_LOCAL_MAC_CLIENT]]
+)
+@pytest.mark.usefixtures("mock_device_registry")
+async def test_option_ignore_local_mac(
+    hass: HomeAssistant,
+    device_registry: dr.DeviceRegistry,
+    config_entry: MockConfigEntry,
+    config_entry_factory: ConfigEntryFactoryType,
+) -> None:
+    """Test the option only ignores Wi-Fi clients with locally-administered MACs."""
+    # Register device entries so the locally-administered MAC trackers are enabled by default
+    for client in (LOCAL_MAC_CLIENT, WIRED_LOCAL_MAC_CLIENT):
+        device_registry.async_get_or_create(
+            config_entry_id=config_entry.entry_id,
+            connections={(dr.CONNECTION_NETWORK_MAC, client["mac"])},
+        )
+    await config_entry_factory()
+
+    # Default: the universal, the Wi-Fi private-MAC and the wired private-MAC clients
+    # are all tracked
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == 3
+    assert hass.states.get("device_tracker.ws_client_1")
+    assert hass.states.get("device_tracker.local_mac_client")
+    assert hass.states.get("device_tracker.wired_local_mac_client")
+
+    # Enable the option: only the Wi-Fi private-MAC client is dropped; the wired one stays
+    hass.config_entries.async_update_entry(
+        config_entry,
+        options={CONF_TRACK_WIRED_CLIENTS: True, CONF_IGNORE_LOCAL_MAC: True},
+    )
+    await hass.async_block_till_done()
+
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == 2
+    assert hass.states.get("device_tracker.ws_client_1")
+    assert not hass.states.get("device_tracker.local_mac_client")
+    assert hass.states.get("device_tracker.wired_local_mac_client")
+
+    # The allowlist takes precedence over the ignore option
+    hass.config_entries.async_update_entry(
+        config_entry,
+        options={
+            CONF_TRACK_WIRED_CLIENTS: True,
+            CONF_IGNORE_LOCAL_MAC: True,
+            CONF_CLIENT_SOURCE: [LOCAL_MAC_CLIENT["mac"]],
+        },
+    )
+    await hass.async_block_till_done()
+
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == 3
+    assert hass.states.get("device_tracker.local_mac_client")
+
+
+@pytest.mark.parametrize(
+    "config_entry_options", [{CONF_BLOCK_CLIENT: ["00:00:00:00:00:03"]}]
+)
+@pytest.mark.parametrize("client_payload", [[WIRED_CLIENT_1]])
+@pytest.mark.parametrize(
+    "clients_all_payload",
+    [
+        [
+            {
+                "hostname": "restored",
+                "is_wired": True,
+                "last_seen": 1562600145,
+                "mac": "00:00:00:00:00:03",
+            },
+            {  # Not previously seen by integration, will not be restored
+                "hostname": "not_restored",
+                "is_wired": True,
+                "last_seen": 1562600145,
+                "mac": "00:00:00:00:00:04",
+            },
+        ]
+    ],
+)
+@pytest.mark.usefixtures("mock_device_registry")
+async def test_restoring_client(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    config_entry: MockConfigEntry,
+    config_entry_factory: ConfigEntryFactoryType,
+    client_payload: list[dict[str, Any]],
+    clients_all_payload: list[dict[str, Any]],
+) -> None:
+    """Verify clients are restored from clients_all if registered to entity registry."""
+    entity_registry.async_get_or_create(
+        TRACKER_DOMAIN,
+        DOMAIN,
+        f"site_id-{clients_all_payload[0]['mac']}",
+        suggested_object_id=clients_all_payload[0]["hostname"],
+        config_entry=config_entry,
+    )
+    entity_registry.async_get_or_create(  # Unique ID already follow format site_id-mac
+        TRACKER_DOMAIN,
+        DOMAIN,
+        f"site_id-{client_payload[0]['mac']}",
+        suggested_object_id=client_payload[0]["hostname"],
+        config_entry=config_entry,
+    )
+
+    await config_entry_factory()
+
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == 2
+    assert hass.states.get("device_tracker.wd_client_1")
+    assert hass.states.get("device_tracker.restored")
+    assert not hass.states.get("device_tracker.not_restored")
+
+
+@pytest.mark.parametrize("client_payload", [[WIRED_CLIENT_1]])
+@pytest.mark.parametrize(
+    "clients_all_payload",
+    [
+        [
+            {
+                "hostname": "recent",
+                "is_wired": True,
+                "last_seen": dt_util.as_timestamp(dt_util.utcnow()),
+                "mac": "00:00:00:00:00:05",
+            },
+            {
+                "hostname": "stale",
+                "is_wired": True,
+                "last_seen": 1562600145,  # 2019, well beyond the retention window
+                "mac": "00:00:00:00:00:06",
+            },
+        ]
+    ],
+)
+async def test_pruning_stale_restored_clients(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    device_registry: dr.DeviceRegistry,
+    config_entry: MockConfigEntry,
+    config_entry_factory: ConfigEntryFactoryType,
+    clients_all_payload: list[dict[str, Any]],
+) -> None:
+    """Restore recently seen inactive clients but prune stale ones and their device."""
+    recent, stale = clients_all_payload
+    # Client with a tracker but absent from clients_all, e.g. a failed fetch
+    absent_mac = "00:00:00:00:00:07"
+
+    entries: dict[str, er.RegistryEntry] = {}
+    for mac, hostname in (
+        (recent["mac"], "recent"),
+        (stale["mac"], "stale"),
+        (absent_mac, "absent"),
+    ):
+        entries[mac] = entity_registry.async_get_or_create(
+            TRACKER_DOMAIN,
+            DOMAIN,
+            f"site_id-{mac}",
+            suggested_object_id=hostname,
+            config_entry=config_entry,
+        )
+        device_registry.async_get_or_create(
+            config_entry_id=config_entry.entry_id,
+            connections={(dr.CONNECTION_NETWORK_MAC, mac)},
+        )
+
+    await config_entry_factory()
+
+    # Recently seen client is restored with its tracker and device intact
+    assert hass.states.get("device_tracker.recent")
+    assert entity_registry.async_get(entries[recent["mac"]].entity_id)
+    assert device_registry.async_get_device_by_connection(
+        (dr.CONNECTION_NETWORK_MAC, recent["mac"]), config_entry.entry_id
+    )
+
+    # Stale client is pruned together with its device
+    assert not hass.states.get("device_tracker.stale")
+    assert entity_registry.async_get(entries[stale["mac"]].entity_id) is None
+    assert (
+        device_registry.async_get_device_by_connection(
+            (dr.CONNECTION_NETWORK_MAC, stale["mac"]), config_entry.entry_id
+        )
+        is None
+    )
+
+    # Client absent from clients_all is left untouched, never pruned on missing data
+    assert entity_registry.async_get(entries[absent_mac].entity_id)
+    assert device_registry.async_get_device_by_connection(
+        (dr.CONNECTION_NETWORK_MAC, absent_mac), config_entry.entry_id
+    )
+
+
+@pytest.mark.parametrize(
+    ("config_entry_options", "counts", "expected"),
+    [
+        (
+            {CONF_TRACK_CLIENTS: True},
+            (3, 1),
+            ((True, True, True), (None, None, True)),
+        ),
+        (
+            {CONF_TRACK_CLIENTS: True, CONF_SSID_FILTER: ["ssid"]},
+            (3, 1),
+            ((True, True, True), (None, None, True)),
+        ),
+        (
+            {CONF_TRACK_CLIENTS: True, CONF_SSID_FILTER: ["ssid-2"]},
+            (2, 1),
+            ((None, True, True), (None, None, True)),
+        ),
+        (
+            {CONF_TRACK_CLIENTS: False, CONF_CLIENT_SOURCE: ["00:00:00:00:00:01"]},
+            (2, 1),
+            ((True, None, True), (None, None, True)),
+        ),
+        (
+            {CONF_TRACK_CLIENTS: False, CONF_CLIENT_SOURCE: ["00:00:00:00:00:02"]},
+            (2, 1),
+            ((None, True, True), (None, None, True)),
+        ),
+        (
+            {CONF_TRACK_WIRED_CLIENTS: True},
+            (3, 2),
+            ((True, True, True), (True, None, True)),
+        ),
+        (
+            {CONF_TRACK_DEVICES: True},
+            (3, 2),
+            ((True, True, True), (True, True, None)),
+        ),
+    ],
+)
+@pytest.mark.parametrize("client_payload", [[WIRELESS_CLIENT_1, WIRED_CLIENT_1]])
+@pytest.mark.parametrize("device_payload", [[SWITCH_1]])
+@pytest.mark.usefixtures("mock_device_registry")
+async def test_config_entry_options_track(
+    hass: HomeAssistant,
+    config_entry_setup: MockConfigEntry,
+    config_entry_options: MappingProxyType[str, Any],
+    counts: tuple[int],
+    expected: tuple[tuple[bool | None, ...], ...],
+) -> None:
+    """Test the different config entry options.
+
+    Validates how many entities are created
+    and that the specific ones exist as expected.
+    """
+    option = next(iter(config_entry_options))
+
+    def assert_state(state: State | None, expected: bool | None):
+        """Assert if state expected."""
+        assert state is None if expected is None else state
+
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == counts[0]
+    assert_state(hass.states.get("device_tracker.ws_client_1"), expected[0][0])
+    assert_state(hass.states.get("device_tracker.wd_client_1"), expected[0][1])
+    assert_state(hass.states.get("device_tracker.switch_1"), expected[0][2])
+
+    # Keep only the primary option and turn it off, everything else uses default
+    hass.config_entries.async_update_entry(config_entry_setup, options={option: False})
+    await hass.async_block_till_done()
+
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == counts[1]
+    assert_state(hass.states.get("device_tracker.ws_client_1"), expected[1][0])
+    assert_state(hass.states.get("device_tracker.wd_client_1"), expected[1][1])
+    assert_state(hass.states.get("device_tracker.switch_1"), expected[1][2])
+
+    # Turn on the primary option, everything else uses default
+    hass.config_entries.async_update_entry(config_entry_setup, options={option: True})
+    await hass.async_block_till_done()
+
+    assert len(hass.states.async_entity_ids(TRACKER_DOMAIN)) == 3
+    assert_state(hass.states.get("device_tracker.ws_client_1"), True)
+    assert_state(hass.states.get("device_tracker.wd_client_1"), True)
+    assert_state(hass.states.get("device_tracker.switch_1"), True)

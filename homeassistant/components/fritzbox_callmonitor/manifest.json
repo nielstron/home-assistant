@@ -1,10 +1,11 @@
 {
   "domain": "fritzbox_callmonitor",
-  "name": "Fritzbox callmonitor",
-  "documentation": "https://www.home-assistant.io/components/fritzbox_callmonitor",
-  "requirements": [
-    "fritzconnection==0.6.5"
-  ],
-  "dependencies": [],
-  "codeowners": []
+  "name": "FRITZ!Box Call Monitor",
+  "codeowners": [],
+  "config_flow": true,
+  "documentation": "https://www.home-assistant.io/integrations/fritzbox_callmonitor",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "loggers": ["fritzconnection"],
+  "requirements": ["fritzconnection[qr]==1.15.1"]
 }

@@ -1,12 +1,10 @@
 {
   "domain": "upcloud",
-  "name": "Upcloud",
-  "documentation": "https://www.home-assistant.io/components/upcloud",
-  "requirements": [
-    "upcloud-api==0.4.3"
-  ],
-  "dependencies": [],
-  "codeowners": [
-    "@scop"
-  ]
+  "name": "UpCloud",
+  "codeowners": ["@scop"],
+  "config_flow": true,
+  "documentation": "https://www.home-assistant.io/integrations/upcloud",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "requirements": ["upcloud-api==2.9.0"]
 }

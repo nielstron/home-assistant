@@ -1,162 +1,133 @@
 """Support for Supla devices."""
-import logging
-from typing import Optional
 
+import logging
+
+from asyncpysupla import SuplaAPI
 import voluptuous as vol
 
-from homeassistant.const import CONF_ACCESS_TOKEN
-import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.discovery import load_platform
-from homeassistant.helpers.entity import Entity
+from homeassistant.const import CONF_ACCESS_TOKEN, Platform
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.discovery import async_load_platform
+from homeassistant.helpers.typing import ConfigType
 
-REQUIREMENTS = ['pysupla==0.0.3']
+from .coordinator import SuplaCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-DOMAIN = 'supla'
 
-CONF_SERVER = 'server'
-CONF_SERVERS = 'servers'
+DOMAIN = "supla"
+CONF_SERVER = "server"
+CONF_SERVERS = "servers"
 
 SUPLA_FUNCTION_HA_CMP_MAP = {
-    'CONTROLLINGTHEROLLERSHUTTER': 'cover'
+    "CONTROLLINGTHEROLLERSHUTTER": Platform.COVER,
+    "CONTROLLINGTHEGATE": Platform.COVER,
+    "CONTROLLINGTHEGARAGEDOOR": Platform.COVER,
+    "LIGHTSWITCH": Platform.SWITCH,
 }
-SUPLA_CHANNELS = 'supla_channels'
-SUPLA_SERVERS = 'supla_servers'
+SUPLA_FUNCTION_NONE = "NONE"
+SUPLA_SERVERS = "supla_servers"
+SUPLA_COORDINATORS = "supla_coordinators"
 
-SERVER_CONFIG = vol.Schema({
-    vol.Required(CONF_SERVER): cv.string,
-    vol.Required(CONF_ACCESS_TOKEN): cv.string
-})
+SERVER_CONFIG = vol.Schema(
+    {
+        vol.Required(CONF_SERVER): cv.string,
+        vol.Required(CONF_ACCESS_TOKEN): cv.string,
+    }
+)
 
-CONFIG_SCHEMA = vol.Schema({
-    DOMAIN: vol.Schema({
-        vol.Required(CONF_SERVERS):
-            vol.All(cv.ensure_list, [SERVER_CONFIG])
-    })
-}, extra=vol.ALLOW_EXTRA)
+CONFIG_SCHEMA = vol.Schema(
+    {
+        DOMAIN: vol.Schema(
+            {vol.Required(CONF_SERVERS): vol.All(cv.ensure_list, [SERVER_CONFIG])}
+        )
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 
 
-def setup(hass, base_config):
+async def async_setup(hass: HomeAssistant, base_config: ConfigType) -> bool:
     """Set up the Supla component."""
-    from pysupla import SuplaAPI
 
     server_confs = base_config[DOMAIN][CONF_SERVERS]
 
-    hass.data[SUPLA_SERVERS] = {}
-    hass.data[SUPLA_CHANNELS] = {}
+    hass.data[DOMAIN] = {SUPLA_SERVERS: {}, SUPLA_COORDINATORS: {}}
+
+    session = async_get_clientsession(hass)
 
     for server_conf in server_confs:
-
         server_address = server_conf[CONF_SERVER]
 
-        server = SuplaAPI(
-            server_address,
-            server_conf[CONF_ACCESS_TOKEN]
-        )
+        server = SuplaAPI(server_address, server_conf[CONF_ACCESS_TOKEN], session)
 
         # Test connection
         try:
-            srv_info = server.get_server_info()
-            if srv_info.get('authenticated'):
-                hass.data[SUPLA_SERVERS][server_conf[CONF_SERVER]] = server
+            srv_info = await server.get_server_info()
+            if srv_info.get("authenticated"):
+                hass.data[DOMAIN][SUPLA_SERVERS][server_conf[CONF_SERVER]] = server
+
             else:
                 _LOGGER.error(
-                    'Server: %s not configured. API call returned: %s',
+                    "Server: %s not configured. API call returned: %s",
                     server_address,
-                    srv_info
+                    srv_info,
                 )
                 return False
-        except IOError:
+        except OSError:
             _LOGGER.exception(
-                'Server: %s not configured. Error on Supla API access: ',
-                server_address
+                "Server: %s not configured. Error on Supla API access: ", server_address
             )
             return False
 
-    discover_devices(hass, base_config)
+    await discover_devices(hass, base_config)
 
     return True
 
 
-def discover_devices(hass, hass_config):
+async def discover_devices(hass, hass_config):
+    """Run periodically to discover new devices.
+
+    Currently it is only run at startup.
     """
-    Run periodically to discover new devices.
+    component_configs: dict[Platform, dict[str, dict]] = {}
 
-    Currently it's only run at startup.
-    """
-    component_configs = {}
+    for server_name, server in hass.data[DOMAIN][SUPLA_SERVERS].items():
+        coordinator = SuplaCoordinator(hass, server, server_name)
 
-    for server_name, server in hass.data[SUPLA_SERVERS].items():
+        await coordinator.async_refresh()
 
-        for channel in server.get_channels(include=['iodevice']):
-            channel_function = channel['function']['name']
+        hass.data[DOMAIN][SUPLA_COORDINATORS][server_name] = coordinator
+
+        for channel_id, channel in coordinator.data.items():
+            channel_function = channel["function"]["name"]
+
+            if channel_function == SUPLA_FUNCTION_NONE:
+                _LOGGER.debug(
+                    "Ignored function: %s, channel ID: %s",
+                    channel_function,
+                    channel["id"],
+                )
+                continue
+
             component_name = SUPLA_FUNCTION_HA_CMP_MAP.get(channel_function)
 
             if component_name is None:
                 _LOGGER.warning(
-                    'Unsupported function: %s, channel id: %s',
-                    channel_function, channel['id']
+                    "Unsupported function: %s, channel ID: %s",
+                    channel_function,
+                    channel["id"],
                 )
                 continue
 
-            channel['server_name'] = server_name
-            component_configs.setdefault(component_name, []).append(channel)
+            channel["server_name"] = server_name
+            component_config = component_configs.setdefault(component_name, {})
+            component_config[f"{server_name}_{channel_id}"] = {
+                "channel_id": channel_id,
+                "server_name": server_name,
+                "function_name": channel["function"]["name"],
+            }
 
     # Load discovered devices
-    for component_name, channel in component_configs.items():
-        load_platform(
-            hass,
-            component_name,
-            'supla',
-            channel,
-            hass_config
-        )
-
-
-class SuplaChannel(Entity):
-    """Base class of a Supla Channel (an equivalent of HA's Entity)."""
-
-    def __init__(self, channel_data):
-        """Channel data -- raw channel information from PySupla."""
-        self.server_name = channel_data['server_name']
-        self.channel_data = channel_data
-
-    @property
-    def server(self):
-        """Return PySupla's server component associated with entity."""
-        return self.hass.data[SUPLA_SERVERS][self.server_name]
-
-    @property
-    def unique_id(self) -> str:
-        """Return a unique ID."""
-        return 'supla-{}-{}'.format(
-            self.channel_data['iodevice']['gUIDString'].lower(),
-            self.channel_data['channelNumber']
-        )
-
-    @property
-    def name(self) -> Optional[str]:
-        """Return the name of the device."""
-        return self.channel_data['caption']
-
-    def action(self, action, **add_pars):
-        """
-        Run server action.
-
-        Actions are currently hardcoded in components.
-        Supla's API enables autodiscovery
-        """
-        _LOGGER.debug(
-            'Executing action %s on channel %d, params: %s',
-            action,
-            self.channel_data['id'],
-            add_pars
-        )
-        self.server.execute_action(self.channel_data['id'], action, **add_pars)
-
-    def update(self):
-        """Call to update state."""
-        self.channel_data = self.server.get_channel(
-            self.channel_data['id'],
-            include=['connected', 'state']
-        )
+    for component_name, config in component_configs.items():
+        await async_load_platform(hass, component_name, DOMAIN, config, hass_config)

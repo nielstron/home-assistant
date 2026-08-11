@@ -1,127 +1,138 @@
 """Test ZHA API."""
+
+from collections.abc import Callable, Coroutine
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, call, patch
+
 import pytest
-from homeassistant.components.switch import DOMAIN
-from homeassistant.components.zha.api import (
-    async_load_api, ATTR_IEEE, TYPE, ID
-)
-from homeassistant.components.zha.core.const import (
-    ATTR_CLUSTER_ID, ATTR_CLUSTER_TYPE, IN, IEEE, MODEL, NAME, QUIRK_APPLIED,
-    ATTR_MANUFACTURER, ATTR_ENDPOINT_ID
-)
-from .common import async_init_zigpy_device
+from zha.application.const import RadioType
+import zigpy.backups
+import zigpy.state
+
+from homeassistant.components.zha import api
+from homeassistant.components.zha.helpers import get_zha_gateway_proxy
+from homeassistant.core import HomeAssistant
+
+if TYPE_CHECKING:
+    from zigpy.application import ControllerApplication
 
 
-@pytest.fixture
-async def zha_client(hass, config_entry, zha_gateway, hass_ws_client):
-    """Test zha switch platform."""
-    from zigpy.zcl.clusters.general import OnOff, Basic
-
-    # load the ZHA API
-    async_load_api(hass)
-
-    # create zigpy device
-    await async_init_zigpy_device(
-        hass, [OnOff.cluster_id, Basic.cluster_id], [], None, zha_gateway)
-
-    # load up switch domain
-    await hass.config_entries.async_forward_entry_setup(
-        config_entry, DOMAIN)
-    await hass.async_block_till_done()
-
-    return await hass_ws_client(hass)
+@pytest.fixture(autouse=True)
+def required_platform_only():
+    """Only set up the required and required base platforms to speed up tests."""
+    with patch("homeassistant.components.zha.PLATFORMS", ()):
+        yield
 
 
-async def test_device_clusters(hass, config_entry, zha_gateway, zha_client):
-    """Test getting device cluster info."""
-    await zha_client.send_json({
-        ID: 5,
-        TYPE: 'zha/devices/clusters',
-        ATTR_IEEE: '00:0d:6f:00:0a:90:69:e7'
-    })
+async def test_async_get_network_settings_active(
+    hass: HomeAssistant, setup_zha: Callable[..., Coroutine[None]]
+) -> None:
+    """Test reading settings with an active ZHA installation."""
+    await setup_zha()
 
-    msg = await zha_client.receive_json()
-
-    assert len(msg['result']) == 2
-
-    cluster_infos = sorted(msg['result'], key=lambda k: k[ID])
-
-    cluster_info = cluster_infos[0]
-    assert cluster_info[TYPE] == IN
-    assert cluster_info[ID] == 0
-    assert cluster_info[NAME] == 'Basic'
-
-    cluster_info = cluster_infos[1]
-    assert cluster_info[TYPE] == IN
-    assert cluster_info[ID] == 6
-    assert cluster_info[NAME] == 'OnOff'
+    settings = await api.async_get_network_settings(hass)
+    assert settings.network_info.channel == 15
 
 
-async def test_device_cluster_attributes(
-        hass, config_entry, zha_gateway, zha_client):
-    """Test getting device cluster attributes."""
-    await zha_client.send_json({
-        ID: 5,
-        TYPE: 'zha/devices/clusters/attributes',
-        ATTR_ENDPOINT_ID: 1,
-        ATTR_IEEE: '00:0d:6f:00:0a:90:69:e7',
-        ATTR_CLUSTER_ID: 6,
-        ATTR_CLUSTER_TYPE: IN
-    })
+async def test_async_get_network_settings_inactive(
+    hass: HomeAssistant,
+    setup_zha: Callable[..., Coroutine[None]],
+    zigpy_app_controller: ControllerApplication,
+) -> None:
+    """Test reading settings with an inactive ZHA installation."""
+    await setup_zha()
 
-    msg = await zha_client.receive_json()
+    gateway = get_zha_gateway_proxy(hass)
+    await hass.config_entries.async_unload(gateway.config_entry.entry_id)
 
-    attributes = msg['result']
-    assert len(attributes) == 4
+    backup = zigpy.backups.NetworkBackup()
+    backup.network_info.channel = 20
+    zigpy_app_controller.backups.backups.append(backup)
 
-    for attribute in attributes:
-        assert attribute[ID] is not None
-        assert attribute[NAME] is not None
+    controller = AsyncMock()
+    controller.SCHEMA = zigpy_app_controller.SCHEMA
+    controller.new = AsyncMock(return_value=zigpy_app_controller)
 
+    with patch.dict(
+        "homeassistant.components.zha.api.RadioType._member_map_",
+        ezsp=MagicMock(controller=controller, description="EZSP"),
+    ):
+        settings = await api.async_get_network_settings(hass)
 
-async def test_device_cluster_commands(
-        hass, config_entry, zha_gateway, zha_client):
-    """Test getting device cluster commands."""
-    await zha_client.send_json({
-        ID: 5,
-        TYPE: 'zha/devices/clusters/commands',
-        ATTR_ENDPOINT_ID: 1,
-        ATTR_IEEE: '00:0d:6f:00:0a:90:69:e7',
-        ATTR_CLUSTER_ID: 6,
-        ATTR_CLUSTER_TYPE: IN
-    })
-
-    msg = await zha_client.receive_json()
-
-    commands = msg['result']
-    assert len(commands) == 6
-
-    for command in commands:
-        assert command[ID] is not None
-        assert command[NAME] is not None
-        assert command[TYPE] is not None
+    assert settings.network_info.channel == 20
+    assert len(zigpy_app_controller.start_network.mock_calls) == 0
 
 
-async def test_list_devices(
-        hass, config_entry, zha_gateway, zha_client):
-    """Test getting entity cluster commands."""
-    await zha_client.send_json({
-        ID: 5,
-        TYPE: 'zha/devices'
-    })
+async def test_async_get_network_settings_missing(
+    hass: HomeAssistant,
+    setup_zha: Callable[..., Coroutine[None]],
+    zigpy_app_controller: ControllerApplication,
+) -> None:
+    """Test reading settings with an inactive ZHA installation, no valid channel."""
+    await setup_zha()
 
-    msg = await zha_client.receive_json()
+    gateway = get_zha_gateway_proxy(hass)
+    await hass.config_entries.async_unload(gateway.config_entry.entry_id)
 
-    devices = msg['result']
-    assert len(devices) == 1
+    # Network settings were never loaded for whatever reason
+    zigpy_app_controller.state.network_info = zigpy.state.NetworkInfo()
+    zigpy_app_controller.state.node_info = zigpy.state.NodeInfo()
 
-    for device in devices:
-        assert device[IEEE] is not None
-        assert device[ATTR_MANUFACTURER] is not None
-        assert device[MODEL] is not None
-        assert device[NAME] is not None
-        assert device[QUIRK_APPLIED] is not None
-        assert device['entities'] is not None
+    settings = await api.async_get_network_settings(hass)
 
-        for entity_reference in device['entities']:
-            assert entity_reference[NAME] is not None
-            assert entity_reference['entity_id'] is not None
+    assert settings is None
+
+
+async def test_async_get_network_settings_failure(hass: HomeAssistant) -> None:
+    """Test reading settings with no ZHA config entries and no database."""
+    with pytest.raises(ValueError):
+        await api.async_get_network_settings(hass)
+
+
+async def test_async_get_radio_type_active(
+    hass: HomeAssistant, setup_zha: Callable[..., Coroutine[None]]
+) -> None:
+    """Test reading the radio type with an active ZHA installation."""
+    await setup_zha()
+
+    radio_type = api.async_get_radio_type(hass)
+    assert radio_type == RadioType.ezsp
+
+
+async def test_async_get_radio_path_active(
+    hass: HomeAssistant, setup_zha: Callable[..., Coroutine[None]]
+) -> None:
+    """Test reading the radio path with an active ZHA installation."""
+    await setup_zha()
+
+    radio_path = api.async_get_radio_path(hass)
+    assert radio_path == "/dev/ttyUSB0"
+
+
+async def test_change_channel(
+    hass: HomeAssistant,
+    setup_zha: Callable[..., Coroutine[None]],
+    zigpy_app_controller: ControllerApplication,
+) -> None:
+    """Test changing the channel."""
+    await setup_zha()
+
+    await api.async_change_channel(hass, 20)
+    assert zigpy_app_controller.move_network_to_channel.mock_calls == [call(20)]
+
+
+async def test_change_channel_auto(
+    hass: HomeAssistant,
+    setup_zha: Callable[..., Coroutine[None]],
+    zigpy_app_controller: ControllerApplication,
+) -> None:
+    """Test changing the channel automatically using an energy scan."""
+    await setup_zha()
+
+    zigpy_app_controller.energy_scan.side_effect = None
+    zigpy_app_controller.energy_scan.return_value = {c: c for c in range(11, 26 + 1)}
+
+    with patch.object(api, "pick_optimal_channel", autospec=True, return_value=25):
+        await api.async_change_channel(hass, "auto")
+
+    assert zigpy_app_controller.move_network_to_channel.mock_calls == [call(25)]

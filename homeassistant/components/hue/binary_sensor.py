@@ -1,39 +1,21 @@
-"""Hue binary sensor entities."""
-from homeassistant.components.binary_sensor import (
-    BinarySensorDevice, DEVICE_CLASS_MOTION)
-from homeassistant.components.hue.sensor_base import (
-    GenericZLLSensor, async_setup_entry as shared_async_setup_entry)
+"""Support for Hue binary sensors."""
+
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+
+from .bridge import HueConfigEntry
+from .v1.binary_sensor import async_setup_entry as setup_entry_v1
+from .v2.binary_sensor import async_setup_entry as setup_entry_v2
 
 
-PRESENCE_NAME_FORMAT = "{} motion"
-
-
-async def async_setup_entry(hass, config_entry, async_add_entities):
-    """Defer binary sensor setup to the shared sensor module."""
-    await shared_async_setup_entry(
-        hass, config_entry, async_add_entities, binary=True)
-
-
-class HuePresence(GenericZLLSensor, BinarySensorDevice):
-    """The presence sensor entity for a Hue motion sensor device."""
-
-    device_class = DEVICE_CLASS_MOTION
-
-    async def _async_update_ha_state(self, *args, **kwargs):
-        await self.async_update_ha_state(self, *args, **kwargs)
-
-    @property
-    def is_on(self):
-        """Return true if the binary sensor is on."""
-        return self.sensor.presence
-
-    @property
-    def device_state_attributes(self):
-        """Return the device state attributes."""
-        attributes = super().device_state_attributes
-        if 'sensitivity' in self.sensor.config:
-            attributes['sensitivity'] = self.sensor.config['sensitivity']
-        if 'sensitivitymax' in self.sensor.config:
-            attributes['sensitivity_max'] = \
-                self.sensor.config['sensitivitymax']
-        return attributes
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: HueConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up binary sensor entities."""
+    bridge = config_entry.runtime_data
+    if bridge.api_version == 1:
+        await setup_entry_v1(hass, config_entry, async_add_entities)
+    else:
+        await setup_entry_v2(hass, config_entry, async_add_entities)

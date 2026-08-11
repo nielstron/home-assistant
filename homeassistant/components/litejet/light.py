@@ -1,90 +1,153 @@
 """Support for LiteJet lights."""
-import logging
 
-from homeassistant.components import litejet
+from typing import Any, override
+
+from pylitejet import LiteJet, LiteJetError
+
 from homeassistant.components.light import (
-    ATTR_BRIGHTNESS, SUPPORT_BRIGHTNESS, Light)
+    ATTR_BRIGHTNESS,
+    ATTR_TRANSITION,
+    ColorMode,
+    LightEntity,
+    LightEntityFeature,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-_LOGGER = logging.getLogger(__name__)
+from . import LiteJetConfigEntry
+from .const import CONF_DEFAULT_TRANSITION, DOMAIN
 
-ATTR_NUMBER = 'number'
-
-
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up lights for the LiteJet platform."""
-    litejet_ = hass.data['litejet_system']
-
-    devices = []
-    for i in litejet_.loads():
-        name = litejet_.get_load_name(i)
-        if not litejet.is_ignored(hass, name):
-            devices.append(LiteJetLight(hass, litejet_, i, name))
-    add_entities(devices, True)
+ATTR_NUMBER = "number"
 
 
-class LiteJetLight(Light):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: LiteJetConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up entry."""
+
+    system = config_entry.runtime_data
+
+    entities = []
+    for index in system.loads():
+        name = await system.get_load_name(index)
+        entities.append(LiteJetLight(hass, config_entry, system, index, name))
+
+    async_add_entities(entities, True)
+
+
+class LiteJetLight(LightEntity):
     """Representation of a single LiteJet light."""
 
-    def __init__(self, hass, lj, i, name):
+    _attr_color_mode = ColorMode.BRIGHTNESS
+    _attr_should_poll = False
+    _attr_supported_color_modes = {ColorMode.BRIGHTNESS}
+    _attr_supported_features = LightEntityFeature.TRANSITION
+    _attr_has_entity_name = True
+    _attr_name = None
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        config_entry: LiteJetConfigEntry,
+        system: LiteJet,
+        index: int,
+        name: str,
+    ) -> None:
         """Initialize a LiteJet light."""
-        self._hass = hass
-        self._lj = lj
-        self._index = i
-        self._brightness = 0
-        self._name = name
+        self._config_entry = config_entry
+        self._lj = system
+        self._index = index
+        self._attr_brightness = 0
+        self._attr_is_on = False
+        self._attr_unique_id = f"{config_entry.entry_id}_{index}"
+        self._attr_extra_state_attributes = {ATTR_NUMBER: self._index}
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{config_entry.entry_id}_light_{index}")},
+            name=name,
+            via_device_id=dr.async_get_device_id_by_identifier(
+                hass,
+                (DOMAIN, f"{config_entry.entry_id}_mcp"),
+                config_entry_id=config_entry.entry_id,
+            ),
+        )
 
-        lj.on_load_activated(i, self._on_load_changed)
-        lj.on_load_deactivated(i, self._on_load_changed)
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Run when this Entity has been added to HA."""
+        self._lj.on_load_activated(self._index, self._on_load_changed)
+        self._lj.on_load_deactivated(self._index, self._on_load_changed)
+        self._lj.on_connected_changed(self._on_connected_changed)
 
-    def _on_load_changed(self):
+    @override
+    async def async_will_remove_from_hass(self) -> None:
+        """Entity being removed from hass."""
+        self._lj.unsubscribe(self._on_load_changed)
+        self._lj.unsubscribe(self._on_connected_changed)
+
+    def _on_load_changed(self, level: int | None) -> None:
         """Handle state changes."""
-        _LOGGER.debug("Updating due to notification for %s", self._name)
         self.schedule_update_ha_state(True)
 
-    @property
-    def supported_features(self):
-        """Flag supported features."""
-        return SUPPORT_BRIGHTNESS
+    def _on_connected_changed(self, connected: bool, reason: str) -> None:
+        """Handle connected changes."""
+        self.schedule_update_ha_state(True)
 
-    @property
-    def name(self):
-        """Return the light's name."""
-        return self._name
-
-    @property
-    def brightness(self):
-        """Return the light's brightness."""
-        return self._brightness
-
-    @property
-    def is_on(self):
-        """Return if the light is on."""
-        return self._brightness != 0
-
-    @property
-    def should_poll(self):
-        """Return that lights do not require polling."""
-        return False
-
-    @property
-    def device_state_attributes(self):
-        """Return the device state attributes."""
-        return {
-            ATTR_NUMBER: self._index
-        }
-
-    def turn_on(self, **kwargs):
+    @override
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the light."""
-        if ATTR_BRIGHTNESS in kwargs:
-            brightness = int(kwargs[ATTR_BRIGHTNESS] / 255 * 99)
-            self._lj.activate_load_at(self._index, brightness, 0)
-        else:
-            self._lj.activate_load(self._index)
 
-    def turn_off(self, **kwargs):
+        # If neither attribute is specified then the simple activate load
+        # LiteJet API will use the per-light default brightness and
+        # transition values programmed in the LiteJet system.
+        if ATTR_BRIGHTNESS not in kwargs and ATTR_TRANSITION not in kwargs:
+            try:
+                await self._lj.activate_load(self._index)
+            except LiteJetError as exc:
+                raise HomeAssistantError from exc
+            return
+
+        # If either attribute is specified then Home Assistant must
+        # control both values.
+        default_transition = self._config_entry.options.get(CONF_DEFAULT_TRANSITION, 0)
+        transition = kwargs.get(ATTR_TRANSITION, default_transition)
+        brightness = int(kwargs.get(ATTR_BRIGHTNESS, 255) / 255 * 99)
+
+        try:
+            await self._lj.activate_load_at(self._index, brightness, int(transition))
+        except LiteJetError as exc:
+            raise HomeAssistantError from exc
+
+    @override
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
-        self._lj.deactivate_load(self._index)
+        if ATTR_TRANSITION in kwargs:
+            try:
+                await self._lj.activate_load_at(self._index, 0, kwargs[ATTR_TRANSITION])
+            except LiteJetError as exc:
+                raise HomeAssistantError from exc
+            return
 
-    def update(self):
+        # If transition attribute is not specified then the simple
+        # deactivate load LiteJet API will use the per-light default
+        # transition value programmed in the LiteJet system.
+        try:
+            await self._lj.deactivate_load(self._index)
+        except LiteJetError as exc:
+            raise HomeAssistantError from exc
+
+    async def async_update(self) -> None:
         """Retrieve the light's brightness from the LiteJet system."""
-        self._brightness = self._lj.get_load_level(self._index) / 99 * 255
+        self._attr_available = self._lj.connected
+
+        if not self.available:
+            return
+
+        self._attr_brightness = int(
+            await self._lj.get_load_level(self._index) / 99 * 255
+        )
+        self._attr_is_on = self.brightness != 0

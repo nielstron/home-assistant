@@ -1,60 +1,119 @@
 """Support for Velbus covers."""
-import logging
+
+from typing import Any, override
+
+from velbusaio.channels import Blind as VelbusBlind
 
 from homeassistant.components.cover import (
-    CoverDevice, SUPPORT_CLOSE, SUPPORT_OPEN, SUPPORT_STOP)
+    ATTR_POSITION,
+    CoverEntity,
+    CoverEntityFeature,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from . import DOMAIN as VELBUS_DOMAIN, VelbusEntity
+from . import VelbusConfigEntry
+from .entity import VelbusEntity, api_call
 
-_LOGGER = logging.getLogger(__name__)
-
-
-async def async_setup_platform(
-        hass, config, async_add_entities, discovery_info=None):
-    """Set up the Velbus xover platform."""
-    if discovery_info is None:
-        return
-    covers = []
-    for cover in discovery_info:
-        module = hass.data[VELBUS_DOMAIN].get_module(cover[0])
-        channel = cover[1]
-        covers.append(VelbusCover(module, channel))
-    async_add_entities(covers)
+PARALLEL_UPDATES = 0
 
 
-class VelbusCover(VelbusEntity, CoverDevice):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: VelbusConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up Velbus switch based on config_entry."""
+    await entry.runtime_data.scan_task
+    async_add_entities(
+        VelbusCover(channel)
+        for channel in entry.runtime_data.controller.get_all_cover()
+    )
+
+
+class VelbusCover(VelbusEntity, CoverEntity):
     """Representation a Velbus cover."""
 
-    @property
-    def supported_features(self):
-        """Flag supported features."""
-        return SUPPORT_OPEN | SUPPORT_CLOSE | SUPPORT_STOP
+    _channel: VelbusBlind
+    _assumed_closed: bool
+
+    def __init__(self, channel: VelbusBlind) -> None:
+        """Initialize the cover."""
+        super().__init__(channel)
+        if self._channel.support_position():
+            self._attr_supported_features = (
+                CoverEntityFeature.OPEN
+                | CoverEntityFeature.CLOSE
+                | CoverEntityFeature.STOP
+                | CoverEntityFeature.SET_POSITION
+            )
+        else:
+            self._attr_supported_features = (
+                CoverEntityFeature.OPEN
+                | CoverEntityFeature.CLOSE
+                | CoverEntityFeature.STOP
+            )
+            self._attr_assumed_state = True
+            # guess the state to get the open/closed icons somewhat working
+            self._assumed_closed = False
 
     @property
-    def is_closed(self):
+    @override
+    def is_closed(self) -> bool | None:
         """Return if the cover is closed."""
-        return self._module.is_closed(self._channel)
+        if self._channel.support_position():
+            return self._channel.is_closed()
+        return self._assumed_closed
 
     @property
-    def current_cover_position(self):
+    @override
+    def is_opening(self) -> bool:
+        """Return if the cover is opening."""
+        if opening := self._channel.is_opening():
+            self._assumed_closed = False
+        return opening
+
+    @property
+    @override
+    def is_closing(self) -> bool:
+        """Return if the cover is closing."""
+        if closing := self._channel.is_closing():
+            self._assumed_closed = True
+        return closing
+
+    @property
+    @override
+    def current_cover_position(self) -> int | None:
         """Return current position of cover.
 
         None is unknown, 0 is closed, 100 is fully open
+        Velbus: 100 = closed, 0 = open
         """
-        if self._module.is_closed(self._channel):
-            return 0
-        if self._module.is_open(self._channel):
-            return 100
+        pos = self._channel.get_position()
+        if pos is not None:
+            return 100 - pos
         return None
 
-    def open_cover(self, **kwargs):
+    @api_call
+    @override
+    async def async_open_cover(self, **kwargs: Any) -> None:
         """Open the cover."""
-        self._module.open(self._channel)
+        await self._channel.open()
 
-    def close_cover(self, **kwargs):
+    @api_call
+    @override
+    async def async_close_cover(self, **kwargs: Any) -> None:
         """Close the cover."""
-        self._module.close(self._channel)
+        await self._channel.close()
 
-    def stop_cover(self, **kwargs):
+    @api_call
+    @override
+    async def async_stop_cover(self, **kwargs: Any) -> None:
         """Stop the cover."""
-        self._module.stop(self._channel)
+        await self._channel.stop()
+
+    @api_call
+    @override
+    async def async_set_cover_position(self, **kwargs: Any) -> None:
+        """Move the cover to a specific position."""
+        await self._channel.set_position(100 - kwargs[ATTR_POSITION])

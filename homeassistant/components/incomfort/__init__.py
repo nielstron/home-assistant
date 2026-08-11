@@ -1,51 +1,40 @@
 """Support for an Intergas boiler via an InComfort/Intouch Lan2RF gateway."""
-import logging
 
-from aiohttp import ClientResponseError
-import voluptuous as vol
 from incomfortclient import Gateway as InComfortGateway
 
-from homeassistant.const import (
-    CONF_HOST, CONF_PASSWORD, CONF_USERNAME)
-from homeassistant.helpers import config_validation as cv
+from homeassistant.const import CONF_HOST, Platform
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.discovery import async_load_platform
 
-_LOGGER = logging.getLogger(__name__)
+from .coordinator import InComfortConfigEntry, InComfortDataCoordinator
 
-DOMAIN = 'incomfort'
+PLATFORMS = (
+    Platform.WATER_HEATER,
+    Platform.BINARY_SENSOR,
+    Platform.SENSOR,
+    Platform.CLIMATE,
+)
 
-CONFIG_SCHEMA = vol.Schema({
-    DOMAIN: vol.Schema({
-        vol.Required(CONF_HOST): cv.string,
-        vol.Inclusive(CONF_USERNAME, 'credentials'): cv.string,
-        vol.Inclusive(CONF_PASSWORD, 'credentials'): cv.string,
-    })
-}, extra=vol.ALLOW_EXTRA)
+INTEGRATION_TITLE = "Intergas InComfort/Intouch Lan2RF gateway"
 
 
-async def async_setup(hass, hass_config):
-    """Create an Intergas InComfort/Intouch system."""
-    incomfort_data = hass.data[DOMAIN] = {}
+async def async_setup_entry(hass: HomeAssistant, entry: InComfortConfigEntry) -> bool:
+    """Set up a config entry."""
 
-    credentials = dict(hass_config[DOMAIN])
+    credentials = dict(entry.data)
     hostname = credentials.pop(CONF_HOST)
-
-    client = incomfort_data['client'] = InComfortGateway(
+    client = InComfortGateway(
         hostname, **credentials, session=async_get_clientsession(hass)
     )
 
-    try:
-        heater = incomfort_data['heater'] = list(await client.heaters)[0]
-    except ClientResponseError as err:
-        _LOGGER.warning(
-            "Setup failed, check your configuration, message is: %s", err)
-        return False
+    coordinator = InComfortDataCoordinator(hass, entry, client)
+    entry.runtime_data = coordinator
+    await coordinator.async_config_entry_first_refresh()
 
-    await heater.update()
-
-    for platform in ['water_heater', 'binary_sensor', 'sensor', 'climate']:
-        hass.async_create_task(async_load_platform(
-            hass, platform, DOMAIN, {}, hass_config))
-
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: InComfortConfigEntry) -> bool:
+    """Unload config entry."""
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

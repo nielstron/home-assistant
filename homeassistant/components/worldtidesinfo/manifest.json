@@ -1,8 +1,8 @@
 {
   "domain": "worldtidesinfo",
-  "name": "Worldtidesinfo",
-  "documentation": "https://www.home-assistant.io/components/worldtidesinfo",
-  "requirements": [],
-  "dependencies": [],
-  "codeowners": []
+  "name": "World Tides",
+  "codeowners": [],
+  "documentation": "https://www.home-assistant.io/integrations/worldtidesinfo",
+  "iot_class": "cloud_polling",
+  "quality_scale": "legacy"
 }

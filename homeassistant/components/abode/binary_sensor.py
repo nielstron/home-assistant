@@ -1,66 +1,59 @@
 """Support for Abode Security System binary sensors."""
-import logging
 
-from homeassistant.components.binary_sensor import BinarySensorDevice
+from typing import cast, override
 
-from . import DOMAIN as ABODE_DOMAIN, AbodeAutomation, AbodeDevice
+from jaraco.abode.devices.binary_sensor import BinarySensor
 
-_LOGGER = logging.getLogger(__name__)
+from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
+    BinarySensorEntity,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util.enum import try_parse_enum
 
-
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up a sensor for an Abode device."""
-    import abodepy.helpers.constants as CONST
-    import abodepy.helpers.timeline as TIMELINE
-
-    data = hass.data[ABODE_DOMAIN]
-
-    device_types = [CONST.TYPE_CONNECTIVITY, CONST.TYPE_MOISTURE,
-                    CONST.TYPE_MOTION, CONST.TYPE_OCCUPANCY,
-                    CONST.TYPE_OPENING]
-
-    devices = []
-    for device in data.abode.get_devices(generic_type=device_types):
-        if data.is_excluded(device):
-            continue
-
-        devices.append(AbodeBinarySensor(data, device))
-
-    for automation in data.abode.get_automations(
-            generic_type=CONST.TYPE_QUICK_ACTION):
-        if data.is_automation_excluded(automation):
-            continue
-
-        devices.append(AbodeQuickActionBinarySensor(
-            data, automation, TIMELINE.AUTOMATION_EDIT_GROUP))
-
-    data.devices.extend(devices)
-
-    add_entities(devices)
+from . import AbodeConfigEntry
+from .entity import AbodeDevice
 
 
-class AbodeBinarySensor(AbodeDevice, BinarySensorDevice):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AbodeConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up Abode binary sensor devices."""
+    data = entry.runtime_data
+
+    device_types = [
+        "connectivity",
+        "moisture",
+        "motion",
+        "occupancy",
+        "door",
+    ]
+
+    async_add_entities(
+        AbodeBinarySensor(data, device)
+        for device in data.abode.get_devices(generic_type=device_types)
+    )
+
+
+class AbodeBinarySensor(AbodeDevice, BinarySensorEntity):
     """A binary sensor implementation for Abode device."""
 
-    @property
-    def is_on(self):
-        """Return True if the binary sensor is on."""
-        return self._device.is_on
+    _attr_name = None
+    _device: BinarySensor
 
     @property
-    def device_class(self):
+    @override
+    def is_on(self) -> bool:
+        """Return True if the binary sensor is on."""
+        return cast(bool, self._device.is_on)
+
+    @property
+    @override
+    def device_class(self) -> BinarySensorDeviceClass | None:
         """Return the class of the binary sensor."""
-        return self._device.generic_type
-
-
-class AbodeQuickActionBinarySensor(AbodeAutomation, BinarySensorDevice):
-    """A binary sensor implementation for Abode quick action automations."""
-
-    def trigger(self):
-        """Trigger a quick automation."""
-        self._automation.trigger()
-
-    @property
-    def is_on(self):
-        """Return True if the binary sensor is on."""
-        return self._automation.is_active
+        if self._device.get_value("is_window") == "1":
+            return BinarySensorDeviceClass.WINDOW
+        return try_parse_enum(BinarySensorDeviceClass, self._device.generic_type)

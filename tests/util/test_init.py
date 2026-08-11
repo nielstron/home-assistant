@@ -1,56 +1,83 @@
 """Test Home Assistant util methods."""
-from unittest.mock import patch, MagicMock
+
 from datetime import datetime, timedelta
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from homeassistant import util
-import homeassistant.util.dt as dt_util
+from homeassistant.util import dt as dt_util
 
 
-def test_sanitize_filename():
-    """Test sanitize_filename."""
-    assert util.sanitize_filename("test") == 'test'
-    assert util.sanitize_filename("/test") == 'test'
-    assert util.sanitize_filename("..test") == 'test'
-    assert util.sanitize_filename("\\test") == 'test'
-    assert util.sanitize_filename("\\../test") == 'test'
+def test_raise_if_invalid_filename() -> None:
+    """Test raise_if_invalid_filename."""
+    assert util.raise_if_invalid_filename("test") is None
+
+    with pytest.raises(ValueError):
+        util.raise_if_invalid_filename("/test")
+
+    with pytest.raises(ValueError):
+        util.raise_if_invalid_filename("..test")
+
+    with pytest.raises(ValueError):
+        util.raise_if_invalid_filename("\\test")
+
+    with pytest.raises(ValueError):
+        util.raise_if_invalid_filename("\\../test")
 
 
-def test_sanitize_path():
-    """Test sanitize_path."""
-    assert util.sanitize_path("test/path") == 'test/path'
-    assert util.sanitize_path("~test/path") == 'test/path'
-    assert util.sanitize_path("~/../test/path") == '//test/path'
+def test_raise_if_invalid_path() -> None:
+    """Test raise_if_invalid_path."""
+    assert util.raise_if_invalid_path("test/path") is None
+
+    with pytest.raises(ValueError):
+        assert util.raise_if_invalid_path("~test/path")
+
+    with pytest.raises(ValueError):
+        assert util.raise_if_invalid_path("~/../test/path")
 
 
-def test_slugify():
+def test_slugify() -> None:
     """Test slugify."""
-    assert util.slugify("T-!@#$!#@$!$est") == 't_est'
-    assert util.slugify("Test More") == 'test_more'
-    assert util.slugify("Test_(More)") == 'test_more'
-    assert util.slugify("Tèst_Mörê") == 'test_more'
-    assert util.slugify("B8:27:EB:00:00:00") == 'b8_27_eb_00_00_00'
-    assert util.slugify("test.com") == 'test_com'
-    assert util.slugify("greg_phone - exp_wayp1") == 'greg_phone_exp_wayp1'
-    assert util.slugify("We are, we are, a... Test Calendar") == \
-        'we_are_we_are_a_test_calendar'
-    assert util.slugify("Tèst_äöüß_ÄÖÜ") == 'test_aouss_aou'
-    assert util.slugify("影師嗎") == 'ying_shi_ma'
-    assert util.slugify("けいふぉんと") == 'keihuonto'
+    assert util.slugify("T-!@#$!#@$!$est") == "t_est"
+    assert util.slugify("Test More") == "test_more"
+    assert util.slugify("Test_(More)") == "test_more"
+    assert util.slugify("Tèst_Mörê") == "test_more"
+    assert util.slugify("B8:27:EB:00:00:00") == "b8_27_eb_00_00_00"
+    assert util.slugify("test.com") == "test_com"
+    assert util.slugify("greg_phone - exp_wayp1") == "greg_phone_exp_wayp1"
+    assert (
+        util.slugify("We are, we are, a... Test Calendar")
+        == "we_are_we_are_a_test_calendar"
+    )
+    assert util.slugify("Tèst_äöüß_ÄÖÜ") == "test_aouss_aou"
+    assert util.slugify("影師嗎") == "ying_shi_ma"
+    assert util.slugify("けいふぉんと") == "keihuonto"
+    assert util.slugify("$") == "unknown"
+    assert util.slugify("Ⓐ") == "a"
+    assert util.slugify("ⓑ") == "b"
+    assert util.slugify("$$$") == "unknown"
+    assert util.slugify("$something") == "something"
+    assert util.slugify("") == ""
+    assert util.slugify(None) == ""
 
 
-def test_repr_helper():
+def test_repr_helper() -> None:
     """Test repr_helper."""
-    assert util.repr_helper("A") == 'A'
-    assert util.repr_helper(5) == '5'
-    assert util.repr_helper(True) == 'True'
-    assert util.repr_helper({"test": 1}) == 'test=1'
-    assert util.repr_helper(datetime(1986, 7, 9, 12, 0, 0)) == \
-        '1986-07-09T12:00:00+00:00'
+    assert util.repr_helper("A") == "A"
+    assert util.repr_helper(5) == "5"
+    assert util.repr_helper(True) == "True"
+    assert util.repr_helper({"test": 1}) == "test=1"
+
+    tz = dt_util.get_time_zone("Europe/Copenhagen")
+    with patch("homeassistant.util.dt.DEFAULT_TIME_ZONE", tz):
+        assert (
+            util.repr_helper(datetime(1986, 7, 9, 12, 0, 0))
+            == "1986-07-09T12:00:00+02:00"
+        )
 
 
-def test_convert():
+def test_convert() -> None:
     """Test convert."""
     assert util.convert("5", int) == 5
     assert util.convert("5", float) == 5.0
@@ -60,53 +87,13 @@ def test_convert():
     assert util.convert(object, int, 1) == 1
 
 
-def test_ensure_unique_string():
+def test_ensure_unique_string() -> None:
     """Test ensure_unique_string."""
-    assert util.ensure_unique_string("Beer", ["Beer", "Beer_2"]) == 'Beer_3'
-    assert util.ensure_unique_string("Beer", ["Wine", "Soda"]) == 'Beer'
+    assert util.ensure_unique_string("Beer", ["Beer", "Beer_2"]) == "Beer_3"
+    assert util.ensure_unique_string("Beer", ["Wine", "Soda"]) == "Beer"
 
 
-def test_ordered_enum():
-    """Test the ordered enum class."""
-    class TestEnum(util.OrderedEnum):
-        """Test enum that can be ordered."""
-
-        FIRST = 1
-        SECOND = 2
-        THIRD = 3
-
-    assert TestEnum.SECOND >= TestEnum.FIRST
-    assert TestEnum.SECOND >= TestEnum.SECOND
-    assert TestEnum.SECOND < TestEnum.THIRD
-
-    assert TestEnum.SECOND > TestEnum.FIRST
-    assert TestEnum.SECOND <= TestEnum.SECOND
-    assert TestEnum.SECOND <= TestEnum.THIRD
-
-    assert TestEnum.SECOND > TestEnum.FIRST
-    assert TestEnum.SECOND <= TestEnum.SECOND
-    assert TestEnum.SECOND <= TestEnum.THIRD
-
-    assert TestEnum.SECOND >= TestEnum.FIRST
-    assert TestEnum.SECOND >= TestEnum.SECOND
-    assert TestEnum.SECOND < TestEnum.THIRD
-
-    # Python will raise a TypeError if the <, <=, >, >= methods
-    # raise a NotImplemented error.
-    with pytest.raises(TypeError):
-        TestEnum.FIRST < 1
-
-    with pytest.raises(TypeError):
-        TestEnum.FIRST <= 1
-
-    with pytest.raises(TypeError):
-        TestEnum.FIRST > 1
-
-    with pytest.raises(TypeError):
-        TestEnum.FIRST >= 1
-
-
-def test_throttle():
+def test_throttle() -> None:
     """Test the add cooldown decorator."""
     calls1 = []
     calls2 = []
@@ -144,14 +131,14 @@ def test_throttle():
     assert len(calls1) == 2
     assert len(calls2) == 1
 
-    with patch('homeassistant.util.utcnow', return_value=plus3):
+    with patch("homeassistant.util.utcnow", return_value=plus3):
         test_throttle1()
         test_throttle2()
 
     assert len(calls1) == 2
     assert len(calls2) == 1
 
-    with patch('homeassistant.util.utcnow', return_value=plus5):
+    with patch("homeassistant.util.utcnow", return_value=plus5):
         test_throttle1()
         test_throttle2()
 
@@ -159,8 +146,9 @@ def test_throttle():
     assert len(calls2) == 2
 
 
-def test_throttle_per_instance():
+def test_throttle_per_instance() -> None:
     """Test that the throttle method is done per instance of a class."""
+
     class Tester:
         """A tester class for the throttle."""
 
@@ -173,8 +161,9 @@ def test_throttle_per_instance():
     assert Tester().hello()
 
 
-def test_throttle_on_method():
+def test_throttle_on_method() -> None:
     """Test that throttle works when wrapping a method."""
+
     class Tester:
         """A tester class for the throttle."""
 
@@ -189,8 +178,9 @@ def test_throttle_on_method():
     assert throttled() is None
 
 
-def test_throttle_on_two_method():
+def test_throttle_on_two_method() -> None:
     """Test that throttle works when wrapping two methods."""
+
     class Tester:
         """A test class for the throttle."""
 
@@ -210,10 +200,10 @@ def test_throttle_on_two_method():
     assert tester.goodbye()
 
 
-@patch.object(util, 'random')
-def test_get_random_string(mock_random):
+@patch.object(util, "random")
+def test_get_random_string(mock_random) -> None:
     """Test get random string."""
-    results = ['A', 'B', 'C']
+    results = ["A", "B", "C"]
 
     def mock_choice(choices):
         return results.pop(0)
@@ -222,11 +212,12 @@ def test_get_random_string(mock_random):
     generator.choice.side_effect = mock_choice
     mock_random.SystemRandom.return_value = generator
 
-    assert util.get_random_string(length=3) == 'ABC'
+    assert util.get_random_string(length=3) == "ABC"
 
 
-async def test_throttle_async():
+async def test_throttle_async() -> None:
     """Test Throttle decorator with async method."""
+
     @util.Throttle(timedelta(seconds=2))
     async def test_method():
         """Only first call should return a value."""
@@ -242,3 +233,31 @@ async def test_throttle_async():
 
     assert (await test_method2()) is True
     assert (await test_method2()) is None
+
+
+@pytest.mark.parametrize(
+    ("input", "expected"),
+    [
+        ("fooBar", "foo_bar"),
+        ("FooBar", "foo_bar"),
+        ("Foobar", "foobar"),
+        ("Foo.bar", "foo_bar"),
+        ("_foo-Bar", "_foo_bar"),
+        ("HTTP", "http"),
+        ("HTTPResponse", "http_response"),
+        ("iPhone", "i_phone"),
+        ("IPAddress", "ip_address"),
+        ("IP_Address", "ip_address"),
+        ("My IP Address", "my_ip_address"),
+        ("LocalIP", "local_ip"),
+        ("Python3Thing", "python3_thing"),
+        ("mTLS", "m_tls"),
+        ("DTrace", "dtrace"),
+        ("IPv4", "ipv4"),
+        ("ID", "id"),
+        ("", ""),
+    ],
+)
+def test_snakecase(input, expected) -> None:
+    """Test snake casing a string."""
+    assert util.snakecase(input) == expected

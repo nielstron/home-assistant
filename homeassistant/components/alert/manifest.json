@@ -1,11 +1,9 @@
 {
   "domain": "alert",
   "name": "Alert",
-  "documentation": "https://www.home-assistant.io/components/alert",
-  "requirements": [],
-  "dependencies": [],
-  "after_dependencies": [
-    "notify"
-  ],
-  "codeowners": []
+  "after_dependencies": ["notify"],
+  "codeowners": ["@home-assistant/core", "@frenck"],
+  "documentation": "https://www.home-assistant.io/integrations/alert",
+  "iot_class": "local_push",
+  "quality_scale": "internal"
 }

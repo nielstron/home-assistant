@@ -1,61 +1,73 @@
 """Support for Twilio."""
+
+from aiohttp import web
+from twilio.rest import Client
 import voluptuous as vol
 
-import homeassistant.helpers.config_validation as cv
+from homeassistant.components import webhook
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_WEBHOOK_ID
-from homeassistant.helpers import config_entry_flow
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_entry_flow, config_validation as cv
+from homeassistant.helpers.typing import ConfigType
+
 from .const import DOMAIN
 
-CONF_ACCOUNT_SID = 'account_sid'
-CONF_AUTH_TOKEN = 'auth_token'
+CONF_ACCOUNT_SID = "account_sid"
+CONF_AUTH_TOKEN = "auth_token"
 
 DATA_TWILIO = DOMAIN
 
-RECEIVED_DATA = '{}_data_received'.format(DOMAIN)
+RECEIVED_DATA = f"{DOMAIN}_data_received"
 
-CONFIG_SCHEMA = vol.Schema({
-    vol.Optional(DOMAIN): vol.Schema({
-        vol.Required(CONF_ACCOUNT_SID): cv.string,
-        vol.Required(CONF_AUTH_TOKEN): cv.string,
-    }),
-}, extra=vol.ALLOW_EXTRA)
+CONFIG_SCHEMA = vol.Schema(
+    {
+        vol.Optional(DOMAIN): vol.Schema(
+            {
+                vol.Required(CONF_ACCOUNT_SID): cv.string,
+                vol.Required(CONF_AUTH_TOKEN): cv.string,
+            }
+        )
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 
 
-async def async_setup(hass, config):
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the Twilio component."""
-    from twilio.rest import Client
     if DOMAIN not in config:
         return True
 
     conf = config[DOMAIN]
     hass.data[DATA_TWILIO] = Client(
-        conf.get(CONF_ACCOUNT_SID), conf.get(CONF_AUTH_TOKEN))
+        conf.get(CONF_ACCOUNT_SID), conf.get(CONF_AUTH_TOKEN)
+    )
     return True
 
 
-async def handle_webhook(hass, webhook_id, request):
+async def handle_webhook(
+    hass: HomeAssistant, webhook_id: str, request: web.Request
+) -> web.Response:
     """Handle incoming webhook from Twilio for inbound messages and calls."""
-    from twilio.twiml import TwiML
-
     data = dict(await request.post())
-    data['webhook_id'] = webhook_id
+    data["webhook_id"] = webhook_id
     hass.bus.async_fire(RECEIVED_DATA, dict(data))
 
-    return TwiML().to_xml()
+    return web.Response(text="")
 
 
-async def async_setup_entry(hass, entry):
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Configure based on config entry."""
-    hass.components.webhook.async_register(
-        DOMAIN, 'Twilio', entry.data[CONF_WEBHOOK_ID], handle_webhook)
+    webhook.async_register(
+        hass, DOMAIN, "Twilio", entry.data[CONF_WEBHOOK_ID], handle_webhook
+    )
     return True
 
 
-async def async_unload_entry(hass, entry):
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    hass.components.webhook.async_unregister(entry.data[CONF_WEBHOOK_ID])
+    webhook.async_unregister(hass, entry.data[CONF_WEBHOOK_ID])
     return True
 
 
-# pylint: disable=invalid-name
 async_remove_entry = config_entry_flow.webhook_async_remove_entry

@@ -1,10 +1,10 @@
 {
   "domain": "worldclock",
   "name": "Worldclock",
-  "documentation": "https://www.home-assistant.io/components/worldclock",
-  "requirements": [],
-  "dependencies": [],
-  "codeowners": [
-    "@fabaff"
-  ]
+  "codeowners": ["@fabaff"],
+  "config_flow": true,
+  "documentation": "https://www.home-assistant.io/integrations/worldclock",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "quality_scale": "internal"
 }

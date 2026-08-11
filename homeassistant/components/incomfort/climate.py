@@ -1,102 +1,126 @@
 """Support for an Intergas boiler via an InComfort/InTouch Lan2RF gateway."""
-from typing import Any, Dict, Optional, List
 
-from homeassistant.components.climate import ClimateDevice
-from homeassistant.components.climate.const import (
-    HVAC_MODE_HEAT, SUPPORT_TARGET_TEMPERATURE)
-from homeassistant.const import ATTR_TEMPERATURE, TEMP_CELSIUS
-from homeassistant.core import callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from typing import Any, override
 
-from . import DOMAIN
+from incomfortclient import Heater as InComfortHeater, Room as InComfortRoom
+
+from homeassistant.components.climate import (
+    ClimateEntity,
+    ClimateEntityFeature,
+    HVACAction,
+    HVACMode,
+)
+from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+
+from .const import CONF_LEGACY_SETPOINT_STATUS, DOMAIN
+from .coordinator import InComfortConfigEntry, InComfortDataCoordinator
+from .entity import IncomfortEntity
+
+PARALLEL_UPDATES = 1
 
 
-async def async_setup_platform(hass, hass_config, async_add_entities,
-                               discovery_info=None):
-    """Set up an InComfort/InTouch climate device."""
-    client = hass.data[DOMAIN]['client']
-    heater = hass.data[DOMAIN]['heater']
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: InComfortConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up InComfort/InTouch climate devices."""
+    incomfort_coordinator = entry.runtime_data
+    legacy_setpoint_status = entry.options.get(CONF_LEGACY_SETPOINT_STATUS, False)
+    heaters = incomfort_coordinator.data.heaters
+    async_add_entities(
+        InComfortClimate(incomfort_coordinator, h, r, legacy_setpoint_status)
+        for h in heaters
+        for r in h.rooms
+    )
 
-    async_add_entities([InComfortClimate(client, r) for r in heater.rooms])
 
-
-class InComfortClimate(ClimateDevice):
+class InComfortClimate(IncomfortEntity, ClimateEntity):
     """Representation of an InComfort/InTouch climate device."""
 
-    def __init__(self, client, room):
+    _attr_min_temp = 5.0
+    _attr_max_temp = 30.0
+    _attr_name = None
+    _attr_hvac_mode = HVACMode.HEAT
+    _attr_hvac_modes = [HVACMode.HEAT]
+    _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
+    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+
+    def __init__(
+        self,
+        coordinator: InComfortDataCoordinator,
+        heater: InComfortHeater,
+        room: InComfortRoom,
+        legacy_setpoint_status: bool,
+    ) -> None:
         """Initialize the climate device."""
-        self._client = client
+        super().__init__(coordinator)
+
+        self._heater = heater
         self._room = room
-        self._name = 'Room {}'.format(room.room_no)
+        self._legacy_setpoint_status = legacy_setpoint_status
 
-    async def async_added_to_hass(self) -> None:
-        """Set up a listener when this entity is added to HA."""
-        async_dispatcher_connect(self.hass, DOMAIN, self._refresh)
-
-    @callback
-    def _refresh(self):
-        self.async_schedule_update_ha_state(force_refresh=True)
-
-    @property
-    def should_poll(self) -> bool:
-        """Return False as this device should never be polled."""
-        return False
-
-    @property
-    def name(self) -> str:
-        """Return the name of the climate device."""
-        return self._name
+        self._attr_unique_id = f"{heater.serial_no}_{room.room_no}"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, self._attr_unique_id)},
+            manufacturer="Intergas",
+            name=f"Thermostat {room.room_no}",
+        )
+        if coordinator.unique_id:
+            self._attr_device_info["via_device_id"] = (
+                dr.async_get_device_id_by_identifier(
+                    coordinator.hass,
+                    (DOMAIN, coordinator.config_entry.entry_id),
+                    config_entry_id=coordinator.config_entry.entry_id,
+                )
+            )
 
     @property
-    def device_state_attributes(self) -> Dict[str, Any]:
+    @override
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Return the device state attributes."""
-        return {'status': self._room.status}
+        return {"status": self._room.status}
 
     @property
-    def temperature_unit(self) -> str:
-        """Return the unit of measurement."""
-        return TEMP_CELSIUS
-
-    @property
-    def hvac_mode(self) -> str:
-        """Return hvac operation ie. heat, cool mode."""
-        return HVAC_MODE_HEAT
-
-    @property
-    def hvac_modes(self) -> List[str]:
-        """Return the list of available hvac operation modes."""
-        return [HVAC_MODE_HEAT]
-
-    @property
-    def current_temperature(self) -> Optional[float]:
+    @override
+    def current_temperature(self) -> float | None:
         """Return the current temperature."""
         return self._room.room_temp
 
     @property
-    def target_temperature(self) -> Optional[float]:
-        """Return the temperature we try to reach."""
-        return self._room.override
+    @override
+    def hvac_action(self) -> HVACAction | None:
+        """Return the actual current HVAC action."""
+        if self._heater.is_burning and self._heater.is_pumping:
+            return HVACAction.HEATING
+        return HVACAction.IDLE
 
     @property
-    def supported_features(self) -> int:
-        """Return the list of supported features."""
-        return SUPPORT_TARGET_TEMPERATURE
+    @override
+    def target_temperature(self) -> float | None:
+        """Return the (override)temperature we try to reach.
 
-    @property
-    def min_temp(self) -> float:
-        """Return max valid temperature that can be set."""
-        return 5.0
+        As we set the override, we report back the override. The actual set point is
+        is returned at a later time.
+        Some older thermostats do not clear the override
+        setting in that case, so we fallback to the returning
+        actual setpoint.
+        """
+        if self._legacy_setpoint_status:
+            return self._room.setpoint
+        return self._room.override or self._room.setpoint
 
-    @property
-    def max_temp(self) -> float:
-        """Return max valid temperature that can be set."""
-        return 30.0
-
-    async def async_set_temperature(self, **kwargs) -> None:
+    @override
+    async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set a new target temperature for this zone."""
-        temperature = kwargs.get(ATTR_TEMPERATURE)
+        temperature: float = kwargs[ATTR_TEMPERATURE]
         await self._room.set_override(temperature)
+        await self.coordinator.async_refresh()
 
-    async def async_set_hvac_mode(self, hvac_mode: str) -> None:
+    @override
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set new target hvac mode."""
-        pass

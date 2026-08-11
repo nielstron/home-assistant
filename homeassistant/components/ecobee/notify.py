@@ -1,35 +1,40 @@
 """Support for Ecobee Send Message service."""
-import logging
 
-import voluptuous as vol
+from typing import override
 
-import homeassistant.helpers.config_validation as cv
-from homeassistant.components import ecobee
-from homeassistant.components.notify import (
-    BaseNotificationService, PLATFORM_SCHEMA)
+from homeassistant.components.notify import NotifyEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-_LOGGER = logging.getLogger(__name__)
-
-CONF_INDEX = 'index'
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Optional(CONF_INDEX, default=0): cv.positive_int,
-})
+from . import EcobeeConfigEntry, EcobeeData
+from .entity import EcobeeBaseEntity
 
 
-def get_service(hass, config, discovery_info=None):
-    """Get the Ecobee notification service."""
-    index = config.get(CONF_INDEX)
-    return EcobeeNotificationService(index)
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: EcobeeConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the ecobee thermostat."""
+    data = config_entry.runtime_data
+    async_add_entities(
+        EcobeeNotifyEntity(data, index) for index in range(len(data.ecobee.thermostats))
+    )
 
 
-class EcobeeNotificationService(BaseNotificationService):
-    """Implement the notification service for the Ecobee thermostat."""
+class EcobeeNotifyEntity(EcobeeBaseEntity, NotifyEntity):
+    """Implement the notification entity for the Ecobee thermostat."""
 
-    def __init__(self, thermostat_index):
-        """Initialize the service."""
-        self.thermostat_index = thermostat_index
+    _attr_name = None
 
-    def send_message(self, message="", **kwargs):
-        """Send a message to a command line."""
-        ecobee.NETWORK.ecobee.send_message(self.thermostat_index, message)
+    def __init__(self, data: EcobeeData, thermostat_index: int) -> None:
+        """Initialize the thermostat."""
+        super().__init__(data, thermostat_index)
+        self._attr_unique_id = (
+            f"{self.thermostat['identifier']}_notify_{thermostat_index}"  # pylint: disable=home-assistant-entity-unique-id-redundant-platform
+        )
+
+    @override
+    def send_message(self, message: str, title: str | None = None) -> None:
+        """Send a message."""
+        self.data.ecobee.send_message(self.thermostat_index, message)

@@ -1,190 +1,199 @@
 """Support for the Transmission BitTorrent client API."""
-from datetime import timedelta
-import logging
 
-import voluptuous as vol
+from functools import partial
+import logging
+import re
+from typing import Any, Final
+
+import transmission_rpc
+from transmission_rpc.error import (
+    TransmissionAuthError,
+    TransmissionConnectError,
+    TransmissionError,
+)
 
 from homeassistant.const import (
-    CONF_HOST, CONF_MONITORED_CONDITIONS, CONF_NAME, CONF_PASSWORD, CONF_PORT,
-    CONF_SCAN_INTERVAL, CONF_USERNAME)
-from homeassistant.helpers import config_validation as cv, discovery
-from homeassistant.helpers.dispatcher import dispatcher_send
-from homeassistant.helpers.event import track_time_interval
+    CONF_HOST,
+    CONF_NAME,
+    CONF_PASSWORD,
+    CONF_PATH,
+    CONF_PORT,
+    CONF_SSL,
+    CONF_USERNAME,
+    Platform,
+)
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryError,
+    ConfigEntryNotReady,
+)
+from homeassistant.helpers import (
+    config_validation as cv,
+    device_registry as dr,
+    entity_registry as er,
+)
+from homeassistant.helpers.device_registry import DeviceEntryType
+from homeassistant.helpers.typing import ConfigType
+
+from .const import DEFAULT_PATH, DEFAULT_SSL, DOMAIN, MIN_REQUIRED_TRANSMISSION_VERSION
+from .coordinator import TransmissionConfigEntry, TransmissionDataUpdateCoordinator
+from .helpers import create_version
+from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
 
-DOMAIN = 'transmission'
-DATA_UPDATED = 'transmission_data_updated'
-DATA_TRANSMISSION = 'data_transmission'
+PLATFORMS = [Platform.EVENT, Platform.SENSOR, Platform.SWITCH]
 
-DEFAULT_NAME = 'Transmission'
-DEFAULT_PORT = 9091
-TURTLE_MODE = 'turtle_mode'
-
-SENSOR_TYPES = {
-    'active_torrents': ['Active Torrents', None],
-    'current_status': ['Status', None],
-    'download_speed': ['Down Speed', 'MB/s'],
-    'paused_torrents': ['Paused Torrents', None],
-    'total_torrents': ['Total Torrents', None],
-    'upload_speed': ['Up Speed', 'MB/s'],
-    'completed_torrents': ['Completed Torrents', None],
-    'started_torrents': ['Started Torrents', None],
+MIGRATION_NAME_TO_KEY = {
+    # Sensors
+    "Down Speed": "download",
+    "Up Speed": "upload",
+    "Status": "status",
+    "Active Torrents": "active_torrents",
+    "Paused Torrents": "paused_torrents",
+    "Total Torrents": "total_torrents",
+    "Completed Torrents": "completed_torrents",
+    "Started Torrents": "started_torrents",
+    # Switches
+    "Switch": "on_off",
+    "Turtle Mode": "turtle_mode",
 }
 
-DEFAULT_SCAN_INTERVAL = timedelta(seconds=120)
 
-CONFIG_SCHEMA = vol.Schema({
-    DOMAIN: vol.Schema({
-        vol.Required(CONF_HOST): cv.string,
-        vol.Optional(CONF_PASSWORD): cv.string,
-        vol.Optional(CONF_USERNAME): cv.string,
-        vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
-        vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-        vol.Optional(TURTLE_MODE, default=False): cv.boolean,
-        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL):
-            cv.time_period,
-        vol.Optional(CONF_MONITORED_CONDITIONS, default=['current_status']):
-        vol.All(cv.ensure_list, [vol.In(SENSOR_TYPES)]),
-    })
-}, extra=vol.ALLOW_EXTRA)
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
-def setup(hass, config):
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up the Transmission component."""
+    async_setup_services(hass)
+    return True
+
+
+async def async_setup_entry(
+    hass: HomeAssistant, config_entry: TransmissionConfigEntry
+) -> bool:
     """Set up the Transmission Component."""
-    host = config[DOMAIN][CONF_HOST]
-    username = config[DOMAIN].get(CONF_USERNAME)
-    password = config[DOMAIN].get(CONF_PASSWORD)
-    port = config[DOMAIN][CONF_PORT]
-    scan_interval = config[DOMAIN][CONF_SCAN_INTERVAL]
 
-    import transmissionrpc
-    from transmissionrpc.error import TransmissionError
+    @callback
+    def update_unique_id(
+        entity_entry: er.RegistryEntry,
+    ) -> dict[str, Any] | None:
+        """Update unique ID of entity entry."""
+        if CONF_NAME not in config_entry.data:
+            return None
+        match = re.search(
+            f"{config_entry.data[CONF_HOST]}"
+            f"-{config_entry.data[CONF_NAME]} (?P<name>.+)",
+            entity_entry.unique_id,
+        )
+
+        if match and (key := MIGRATION_NAME_TO_KEY.get(match.group("name"))):
+            return {"new_unique_id": f"{config_entry.entry_id}-{key}"}
+        return None
+
+    await er.async_migrate_entries(hass, config_entry.entry_id, update_unique_id)
+
     try:
-        api = transmissionrpc.Client(
-            host, port=port, user=username, password=password)
-        api.session_stats()
-    except TransmissionError as error:
-        if str(error).find("401: Unauthorized"):
-            _LOGGER.error("Credentials for"
-                          " Transmission client are not valid")
-        return False
+        api = await get_api(hass, dict(config_entry.data))
+    except TransmissionAuthError as err:
+        raise ConfigEntryAuthFailed from err
+    except (TransmissionConnectError, TransmissionError) as err:
+        raise ConfigEntryNotReady from err
 
-    tm_data = hass.data[DATA_TRANSMISSION] = TransmissionData(
-        hass, config, api)
+    version = create_version(api.server_version)
+    if version.valid and version < MIN_REQUIRED_TRANSMISSION_VERSION:
+        raise ConfigEntryError(
+            translation_domain=DOMAIN,
+            translation_key="version_error",
+            translation_placeholders={
+                "transmission_version": api.server_version,
+                "min_version": MIN_REQUIRED_TRANSMISSION_VERSION,
+            },
+        )
 
-    tm_data.update()
-    tm_data.init_torrent_list()
+    protocol: Final = "https" if config_entry.data[CONF_SSL] else "http"
+    device_registry = dr.async_get(hass)
+    device_registry.async_get_or_create(
+        config_entry_id=config_entry.entry_id,
+        identifiers={(DOMAIN, config_entry.entry_id)},
+        manufacturer="Transmission",
+        entry_type=DeviceEntryType.SERVICE,
+        sw_version=api.server_version,
+        configuration_url=(
+            f"{protocol}://{config_entry.data[CONF_HOST]}:{config_entry.data[CONF_PORT]}"
+        ),
+    )
 
-    def refresh(event_time):
-        """Get the latest data from Transmission."""
-        tm_data.update()
+    coordinator = TransmissionDataUpdateCoordinator(hass, config_entry, api)
+    await hass.async_add_executor_job(coordinator.init_torrent_list)
 
-    track_time_interval(hass, refresh, scan_interval)
+    await coordinator.async_config_entry_first_refresh()
+    config_entry.runtime_data = coordinator
 
-    sensorconfig = {
-        'sensors': config[DOMAIN][CONF_MONITORED_CONDITIONS],
-        'client_name': config[DOMAIN][CONF_NAME]}
-
-    discovery.load_platform(hass, 'sensor', DOMAIN, sensorconfig, config)
-
-    if config[DOMAIN][TURTLE_MODE]:
-        discovery.load_platform(hass, 'switch', DOMAIN, sensorconfig, config)
+    await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
 
     return True
 
 
-class TransmissionData:
-    """Get the latest data and update the states."""
+async def async_unload_entry(
+    hass: HomeAssistant, config_entry: TransmissionConfigEntry
+) -> bool:
+    """Unload Transmission Entry from config_entry."""
+    return await hass.config_entries.async_unload_platforms(config_entry, PLATFORMS)
 
-    def __init__(self, hass, config, api):
-        """Initialize the Transmission RPC API."""
-        self.data = None
-        self.torrents = None
-        self.session = None
-        self.available = True
-        self._api = api
-        self.completed_torrents = []
-        self.started_torrents = []
-        self.hass = hass
 
-    def update(self):
-        """Get the latest data from Transmission instance."""
-        from transmissionrpc.error import TransmissionError
+async def async_migrate_entry(
+    hass: HomeAssistant, config_entry: TransmissionConfigEntry
+) -> bool:
+    """Migrate an old config entry."""
+    _LOGGER.debug(
+        "Migrating from version %s.%s",
+        config_entry.version,
+        config_entry.minor_version,
+    )
 
-        try:
-            self.data = self._api.session_stats()
-            self.torrents = self._api.get_torrents()
-            self.session = self._api.get_session()
+    if config_entry.version == 1:
+        if config_entry.minor_version < 2:
+            new = {**config_entry.data}
+            new[CONF_PATH] = DEFAULT_PATH
+            new[CONF_SSL] = DEFAULT_SSL
 
-            self.check_completed_torrent()
-            self.check_started_torrent()
+        hass.config_entries.async_update_entry(
+            config_entry, data=new, version=1, minor_version=2
+        )
 
-            dispatcher_send(self.hass, DATA_UPDATED)
+    _LOGGER.debug(
+        "Migration to version %s.%s successful",
+        config_entry.version,
+        config_entry.minor_version,
+    )
 
-            _LOGGER.debug("Torrent Data updated")
-            self.available = True
-        except TransmissionError:
-            self.available = False
-            _LOGGER.error("Unable to connect to Transmission client")
+    return True
 
-    def init_torrent_list(self):
-        """Initialize torrent lists."""
-        self.torrents = self._api.get_torrents()
-        self.completed_torrents = [
-            x.name for x in self.torrents if x.status == "seeding"]
-        self.started_torrents = [
-            x.name for x in self.torrents if x.status == "downloading"]
 
-    def check_completed_torrent(self):
-        """Get completed torrent functionality."""
-        actual_torrents = self.torrents
-        actual_completed_torrents = [
-            var.name for var in actual_torrents if var.status == "seeding"]
+async def get_api(
+    hass: HomeAssistant, entry: dict[str, Any]
+) -> transmission_rpc.Client:
+    """Get Transmission client."""
+    protocol: Final = "https" if entry[CONF_SSL] else "http"
+    host = entry[CONF_HOST]
+    port = entry[CONF_PORT]
+    path = entry[CONF_PATH]
+    username = entry.get(CONF_USERNAME)
+    password = entry.get(CONF_PASSWORD)
 
-        tmp_completed_torrents = list(
-            set(actual_completed_torrents).difference(
-                self.completed_torrents))
+    api = await hass.async_add_executor_job(
+        partial(
+            transmission_rpc.Client,
+            username=username,
+            password=password,
+            protocol=protocol,
+            host=host,
+            port=port,
+            path=path,
+        )
+    )
 
-        for var in tmp_completed_torrents:
-            self.hass.bus.fire(
-                'transmission_downloaded_torrent', {
-                    'name': var})
-
-        self.completed_torrents = actual_completed_torrents
-
-    def check_started_torrent(self):
-        """Get started torrent functionality."""
-        actual_torrents = self.torrents
-        actual_started_torrents = [
-            var.name for var
-            in actual_torrents if var.status == "downloading"]
-
-        tmp_started_torrents = list(
-            set(actual_started_torrents).difference(
-                self.started_torrents))
-
-        for var in tmp_started_torrents:
-            self.hass.bus.fire(
-                'transmission_started_torrent', {
-                    'name': var})
-        self.started_torrents = actual_started_torrents
-
-    def get_started_torrent_count(self):
-        """Get the number of started torrents."""
-        return len(self.started_torrents)
-
-    def get_completed_torrent_count(self):
-        """Get the number of completed torrents."""
-        return len(self.completed_torrents)
-
-    def set_alt_speed_enabled(self, is_enabled):
-        """Set the alternative speed flag."""
-        self._api.set_session(alt_speed_enabled=is_enabled)
-
-    def get_alt_speed_enabled(self):
-        """Get the alternative speed flag."""
-        if self.session is None:
-            return None
-
-        return self.session.alt_speed_enabled
+    _LOGGER.debug("Successfully connected to %s", host)
+    return api

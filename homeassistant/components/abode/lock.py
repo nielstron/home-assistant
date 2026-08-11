@@ -1,43 +1,49 @@
-"""Support for Abode Security System locks."""
-import logging
+"""Support for the Abode Security System locks."""
 
-from homeassistant.components.lock import LockDevice
+from typing import Any, override
 
-from . import DOMAIN as ABODE_DOMAIN, AbodeDevice
+from jaraco.abode.devices.lock import Lock
 
-_LOGGER = logging.getLogger(__name__)
+from homeassistant.components.lock import LockEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+
+from . import AbodeConfigEntry
+from .entity import AbodeDevice
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AbodeConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     """Set up Abode lock devices."""
-    import abodepy.helpers.constants as CONST
+    data = entry.runtime_data
 
-    data = hass.data[ABODE_DOMAIN]
-
-    devices = []
-    for device in data.abode.get_devices(generic_type=CONST.TYPE_LOCK):
-        if data.is_excluded(device):
-            continue
-
-        devices.append(AbodeLock(data, device))
-
-    data.devices.extend(devices)
-
-    add_entities(devices)
+    async_add_entities(
+        AbodeLock(data, device)
+        for device in data.abode.get_devices(generic_type="lock")
+    )
 
 
-class AbodeLock(AbodeDevice, LockDevice):
+class AbodeLock(AbodeDevice, LockEntity):
     """Representation of an Abode lock."""
 
-    def lock(self, **kwargs):
+    _device: Lock
+    _attr_name = None
+
+    @override
+    def lock(self, **kwargs: Any) -> None:
         """Lock the device."""
         self._device.lock()
 
-    def unlock(self, **kwargs):
+    @override
+    def unlock(self, **kwargs: Any) -> None:
         """Unlock the device."""
         self._device.unlock()
 
     @property
-    def is_locked(self):
+    @override
+    def is_locked(self) -> bool:
         """Return true if device is on."""
-        return self._device.is_locked
+        return bool(self._device.is_locked)

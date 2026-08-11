@@ -1,74 +1,72 @@
 """Demo platform that has two fake switches."""
-from homeassistant.components.switch import SwitchDevice
-from homeassistant.const import DEVICE_DEFAULT_NAME
+
+from typing import Any, override
+
+from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+
+from . import DOMAIN
 
 
-def setup_platform(hass, config, add_entities_callback, discovery_info=None):
-    """Set up the demo switches."""
-    add_entities_callback([
-        DemoSwitch('Decorative Lights', True, None, True),
-        DemoSwitch('AC', False, 'mdi:air-conditioner', False)
-    ])
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the demo switch platform."""
+    async_add_entities(
+        [
+            DemoSwitch("switch1", "Decorative Lights", True, True),
+            DemoSwitch(
+                "switch2",
+                "AC",
+                False,
+                False,
+                translation_key="air_conditioner",
+                device_class=SwitchDeviceClass.OUTLET,
+            ),
+        ]
+    )
 
 
-class DemoSwitch(SwitchDevice):
+class DemoSwitch(SwitchEntity):
     """Representation of a demo switch."""
 
-    def __init__(self, name, state, icon, assumed, device_class=None):
+    _attr_has_entity_name = True
+    _attr_name = None
+    _attr_should_poll = False
+
+    def __init__(
+        self,
+        unique_id: str,
+        device_name: str,
+        state: bool,
+        assumed: bool,
+        translation_key: str | None = None,
+        device_class: SwitchDeviceClass | None = None,
+    ) -> None:
         """Initialize the Demo switch."""
-        self._name = name or DEVICE_DEFAULT_NAME
-        self._state = state
-        self._icon = icon
-        self._assumed = assumed
-        self._device_class = device_class
+        self._attr_assumed_state = assumed
+        self._attr_device_class = device_class
+        self._attr_translation_key = translation_key
+        self._attr_is_on = state
+        self._attr_unique_id = unique_id
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, unique_id)},
+            name=device_name,
+        )
 
-    @property
-    def should_poll(self):
-        """No polling needed for a demo switch."""
-        return False
-
-    @property
-    def name(self):
-        """Return the name of the device if any."""
-        return self._name
-
-    @property
-    def icon(self):
-        """Return the icon to use for device if any."""
-        return self._icon
-
-    @property
-    def assumed_state(self):
-        """Return if the state is based on assumptions."""
-        return self._assumed
-
-    @property
-    def current_power_w(self):
-        """Return the current power usage in W."""
-        if self._state:
-            return 100
-
-    @property
-    def today_energy_kwh(self):
-        """Return the today total energy usage in kWh."""
-        return 15
-
-    @property
-    def is_on(self):
-        """Return true if switch is on."""
-        return self._state
-
-    @property
-    def device_class(self):
-        """Return device of entity."""
-        return self._device_class
-
-    def turn_on(self, **kwargs):
+    @override
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the switch on."""
-        self._state = True
-        self.schedule_update_ha_state()
+        self._attr_is_on = True
+        self.async_write_ha_state()
 
-    def turn_off(self, **kwargs):
-        """Turn the device off."""
-        self._state = False
-        self.schedule_update_ha_state()
+    @override
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn the switch off."""
+        self._attr_is_on = False
+        self.async_write_ha_state()

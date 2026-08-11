@@ -1,26 +1,35 @@
-"""Support for thr Free Mobile SMS platform."""
-import logging
+"""Support for Free Mobile SMS platform."""
 
+from http import HTTPStatus
+import logging
+from typing import Any, override
+
+from freesms import FreeClient
 import voluptuous as vol
 
+from homeassistant.components.notify import (
+    PLATFORM_SCHEMA as NOTIFY_PLATFORM_SCHEMA,
+    BaseNotificationService,
+)
 from homeassistant.const import CONF_ACCESS_TOKEN, CONF_USERNAME
-import homeassistant.helpers.config_validation as cv
-
-from homeassistant.components.notify import (PLATFORM_SCHEMA,
-                                             BaseNotificationService)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_USERNAME): cv.string,
-    vol.Required(CONF_ACCESS_TOKEN): cv.string,
-})
+PLATFORM_SCHEMA = NOTIFY_PLATFORM_SCHEMA.extend(
+    {vol.Required(CONF_USERNAME): cv.string, vol.Required(CONF_ACCESS_TOKEN): cv.string}
+)
 
 
-def get_service(hass, config, discovery_info=None):
+def get_service(
+    hass: HomeAssistant,
+    config: ConfigType,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> FreeSMSNotificationService:
     """Get the Free Mobile SMS notification service."""
-    return FreeSMSNotificationService(
-        config[CONF_USERNAME], config[CONF_ACCESS_TOKEN])
+    return FreeSMSNotificationService(config[CONF_USERNAME], config[CONF_ACCESS_TOKEN])
 
 
 class FreeSMSNotificationService(BaseNotificationService):
@@ -28,18 +37,18 @@ class FreeSMSNotificationService(BaseNotificationService):
 
     def __init__(self, username, access_token):
         """Initialize the service."""
-        from freesms import FreeClient
         self.free_client = FreeClient(username, access_token)
 
-    def send_message(self, message="", **kwargs):
+    @override
+    def send_message(self, message: str = "", **kwargs: Any) -> None:
         """Send a message to the Free Mobile user cell."""
         resp = self.free_client.send_sms(message)
 
-        if resp.status_code == 400:
+        if resp.status_code == HTTPStatus.BAD_REQUEST:
             _LOGGER.error("At least one parameter is missing")
-        elif resp.status_code == 402:
+        elif resp.status_code == HTTPStatus.PAYMENT_REQUIRED:
             _LOGGER.error("Too much SMS send in a few time")
-        elif resp.status_code == 403:
+        elif resp.status_code == HTTPStatus.FORBIDDEN:
             _LOGGER.error("Wrong Username/Password")
-        elif resp.status_code == 500:
+        elif resp.status_code == HTTPStatus.INTERNAL_SERVER_ERROR:
             _LOGGER.error("Server error, try later")

@@ -1,65 +1,127 @@
 """Support for Freebox devices (Freebox v6 and Freebox mini 4K)."""
-from collections import namedtuple
-import logging
 
-from homeassistant.components.device_tracker import DeviceScanner
+from datetime import datetime
+from typing import Any, override
 
-from . import DATA_FREEBOX
+from homeassistant.components.device_tracker import ScannerEntity
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-_LOGGER = logging.getLogger(__name__)
-
-
-async def async_get_scanner(hass, config):
-    """Validate the configuration and return a Freebox scanner."""
-    scanner = FreeboxDeviceScanner(hass.data[DATA_FREEBOX])
-    await scanner.async_connect()
-    return scanner if scanner.success_init else None
-
-Device = namedtuple('Device', ['id', 'name', 'ip'])
+from .const import DEFAULT_DEVICE_NAME, DEVICE_ICONS
+from .router import FreeboxConfigEntry, FreeboxRouter
 
 
-def _build_device(device_dict):
-    return Device(
-        device_dict['l2ident']['id'],
-        device_dict['primary_name'],
-        device_dict['l3connectivities'][0]['addr'])
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: FreeboxConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up device tracker for Freebox component."""
+    router = entry.runtime_data
+    tracked: set[str] = set()
+
+    @callback
+    def update_router() -> None:
+        """Update the values of the router."""
+        add_entities(router, async_add_entities, tracked)
+
+    entry.async_on_unload(
+        async_dispatcher_connect(hass, router.signal_device_new, update_router)
+    )
+
+    update_router()
 
 
-class FreeboxDeviceScanner(DeviceScanner):
-    """Queries the Freebox device."""
+@callback
+def add_entities(
+    router: FreeboxRouter,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+    tracked: set[str],
+) -> None:
+    """Add new tracker entities from the router."""
+    new_tracked = []
 
-    def __init__(self, fbx):
-        """Initialize the scanner."""
-        self.last_results = {}
-        self.success_init = False
-        self.connection = fbx
+    for mac, device in router.devices.items():
+        if mac in tracked:
+            continue
 
-    async def async_connect(self):
-        """Initialize connection to the router."""
-        # Test the router is accessible.
-        data = await self.connection.lan.get_hosts_list()
-        self.success_init = data is not None
+        new_tracked.append(FreeboxDevice(router, device))
+        tracked.add(mac)
 
-    async def async_scan_devices(self):
-        """Scan for new devices and return a list with found device IDs."""
-        await self.async_update_info()
-        return [device.id for device in self.last_results]
+    async_add_entities(new_tracked, True)
 
-    async def get_device_name(self, device):
-        """Return the name of the given device or None if we don't know."""
-        name = next((
-            result.name for result in self.last_results
-            if result.id == device), None)
-        return name
 
-    async def async_update_info(self):
-        """Ensure the information from the Freebox router is up to date."""
-        _LOGGER.debug('Checking Devices')
+class FreeboxDevice(ScannerEntity):
+    """Representation of a Freebox device."""
 
-        hosts = await self.connection.lan.get_hosts_list()
+    _attr_has_entity_name = True
+    _attr_should_poll = False
 
-        last_results = [_build_device(device)
-                        for device in hosts
-                        if device['active']]
+    def __init__(self, router: FreeboxRouter, device: dict[str, Any]) -> None:
+        """Initialize a Freebox device."""
+        self._router = router
+        self._name = device["primary_name"].strip() or DEFAULT_DEVICE_NAME
+        self._mac = device["l2ident"]["id"]
+        self._manufacturer = device["vendor_name"]
+        self._attr_icon = icon_for_freebox_device(device)
+        self._active = False
+        self._attr_extra_state_attributes: dict[str, Any] = {}
 
-        self.last_results = last_results
+    @callback
+    def async_update_state(self) -> None:
+        """Update the Freebox device."""
+        device = self._router.devices[self._mac]
+        self._active = device["active"]
+        if device.get("attrs") is None:
+            # device
+            self._attr_extra_state_attributes = {
+                "last_time_reachable": datetime.fromtimestamp(
+                    device["last_time_reachable"]
+                ),
+                "last_time_activity": datetime.fromtimestamp(device["last_activity"]),
+            }
+        else:
+            # router
+            self._attr_extra_state_attributes = device["attrs"]
+
+    @property
+    @override
+    def mac_address(self) -> str:
+        """Return a unique ID."""
+        return self._mac
+
+    @property
+    @override
+    def name(self) -> str:
+        """Return the name."""
+        return self._name
+
+    @property
+    @override
+    def is_connected(self) -> bool:
+        """Return true if the device is connected to the network."""
+        return self._active
+
+    @callback
+    def async_on_demand_update(self) -> None:
+        """Update state."""
+        self.async_update_state()
+        self.async_write_ha_state()
+
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Register state update callback."""
+        self.async_update_state()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                self._router.signal_device_update,
+                self.async_on_demand_update,
+            )
+        )
+
+
+def icon_for_freebox_device(device: dict[str, Any]) -> str:
+    """Return a device icon from its type."""
+    return DEVICE_ICONS.get(device["host_type"], "mdi:help-network")

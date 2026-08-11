@@ -1,13 +1,12 @@
 {
   "domain": "mailgun",
   "name": "Mailgun",
+  "codeowners": [],
   "config_flow": true,
-  "documentation": "https://www.home-assistant.io/components/mailgun",
-  "requirements": [
-    "pymailgunner==1.4"
-  ],
-  "dependencies": [
-    "webhook"
-  ],
-  "codeowners": []
+  "dependencies": ["webhook"],
+  "documentation": "https://www.home-assistant.io/integrations/mailgun",
+  "integration_type": "service",
+  "iot_class": "cloud_push",
+  "loggers": ["pymailgunner"],
+  "requirements": ["pymailgunner==1.4"]
 }

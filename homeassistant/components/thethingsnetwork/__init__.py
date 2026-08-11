@@ -1,40 +1,43 @@
 """Support for The Things network."""
+
 import logging
 
-import voluptuous as vol
+from homeassistant.const import CONF_API_KEY, CONF_HOST
+from homeassistant.core import HomeAssistant
 
-import homeassistant.helpers.config_validation as cv
+from .const import PLATFORMS, TTN_API_HOST
+from .coordinator import TTNConfigEntry, TTNCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-CONF_ACCESS_KEY = 'access_key'
-CONF_APP_ID = 'app_id'
 
-DATA_TTN = 'data_thethingsnetwork'
-DOMAIN = 'thethingsnetwork'
+async def async_setup_entry(hass: HomeAssistant, entry: TTNConfigEntry) -> bool:
+    """Establish connection with The Things Network."""
 
-TTN_ACCESS_KEY = 'ttn_access_key'
-TTN_APP_ID = 'ttn_app_id'
-TTN_DATA_STORAGE_URL = \
-    'https://{app_id}.data.thethingsnetwork.org/{endpoint}/{device_id}'
+    _LOGGER.debug(
+        "Set up %s at %s",
+        entry.data[CONF_API_KEY],
+        entry.data.get(CONF_HOST, TTN_API_HOST),
+    )
 
-CONFIG_SCHEMA = vol.Schema({
-    DOMAIN: vol.Schema({
-        vol.Required(CONF_APP_ID): cv.string,
-        vol.Required(CONF_ACCESS_KEY): cv.string,
-    }),
-}, extra=vol.ALLOW_EXTRA)
+    coordinator = TTNCoordinator(hass, entry)
 
+    await coordinator.async_config_entry_first_refresh()
 
-async def async_setup(hass, config):
-    """Initialize of The Things Network component."""
-    conf = config[DOMAIN]
-    app_id = conf.get(CONF_APP_ID)
-    access_key = conf.get(CONF_ACCESS_KEY)
+    entry.runtime_data = coordinator
 
-    hass.data[DATA_TTN] = {
-        TTN_ACCESS_KEY: access_key,
-        TTN_APP_ID: app_id,
-    }
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: TTNConfigEntry) -> bool:
+    """Unload a config entry."""
+
+    _LOGGER.debug(
+        "Remove %s at %s",
+        entry.data[CONF_API_KEY],
+        entry.data.get(CONF_HOST, TTN_API_HOST),
+    )
+
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

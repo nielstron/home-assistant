@@ -1,10 +1,20 @@
 {
   "domain": "vesync",
-  "name": "Vesync",
-  "documentation": "https://www.home-assistant.io/components/vesync",
-  "requirements": [
-    "pyvesync_v2==0.9.7"
+  "name": "VeSync",
+  "codeowners": [
+    "@markperdue",
+    "@webdjoe",
+    "@thegardenmonkey",
+    "@cdnninja",
+    "@iprak",
+    "@sapuseven"
   ],
-  "dependencies": [],
-  "codeowners": []
+  "config_flow": true,
+  "dhcp": [{ "hostname": "levoit-*" }],
+  "documentation": "https://www.home-assistant.io/integrations/vesync",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "loggers": ["pyvesync"],
+  "quality_scale": "bronze",
+  "requirements": ["pyvesync==3.4.2"]
 }

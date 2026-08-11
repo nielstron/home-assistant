@@ -1,113 +1,95 @@
-"""Platform for the Aladdin Connect cover component."""
-import logging
+"""Cover Entity for Genie Garage Door."""
 
-import voluptuous as vol
+from typing import Any, override
 
-from homeassistant.components.cover import (CoverDevice, PLATFORM_SCHEMA,
-                                            SUPPORT_OPEN, SUPPORT_CLOSE)
-from homeassistant.const import (CONF_USERNAME, CONF_PASSWORD, STATE_CLOSED,
-                                 STATE_OPENING, STATE_CLOSING, STATE_OPEN)
-import homeassistant.helpers.config_validation as cv
+import aiohttp
 
-_LOGGER = logging.getLogger(__name__)
+from homeassistant.components.cover import CoverDeviceClass, CoverEntity
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-NOTIFICATION_ID = 'aladdin_notification'
-NOTIFICATION_TITLE = 'Aladdin Connect Cover Setup'
+from .const import DOMAIN, SUPPORTED_FEATURES
+from .coordinator import AladdinConnectConfigEntry, AladdinConnectCoordinator
+from .entity import AladdinConnectEntity
 
-STATES_MAP = {
-    'open': STATE_OPEN,
-    'opening': STATE_OPENING,
-    'closed': STATE_CLOSED,
-    'closing': STATE_CLOSING
-}
-
-SUPPORTED_FEATURES = SUPPORT_OPEN | SUPPORT_CLOSE
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_USERNAME): cv.string,
-    vol.Required(CONF_PASSWORD): cv.string
-})
+PARALLEL_UPDATES = 1
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up the Aladdin Connect platform."""
-    from aladdin_connect import AladdinConnectClient
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AladdinConnectConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the cover platform."""
+    coordinator = entry.runtime_data
+    known_devices: set[str] = set()
 
-    username = config.get(CONF_USERNAME)
-    password = config.get(CONF_PASSWORD)
-    acc = AladdinConnectClient(username, password)
+    @callback
+    def _async_add_new_devices() -> None:
+        """Detect and add entities for new doors."""
+        current_devices = set(coordinator.data)
+        new_devices = current_devices - known_devices
+        if new_devices:
+            known_devices.update(new_devices)
+            async_add_entities(
+                AladdinCoverEntity(coordinator, door_id) for door_id in new_devices
+            )
 
-    try:
-        if not acc.login():
-            raise ValueError("Username or Password is incorrect")
-        add_entities(AladdinDevice(acc, door) for door in acc.get_doors())
-    except (TypeError, KeyError, NameError, ValueError) as ex:
-        _LOGGER.error("%s", ex)
-        hass.components.persistent_notification.create(
-            'Error: {}<br />'
-            'You will need to restart hass after fixing.'
-            ''.format(ex),
-            title=NOTIFICATION_TITLE,
-            notification_id=NOTIFICATION_ID)
+    _async_add_new_devices()
+    entry.async_on_unload(coordinator.async_add_listener(_async_add_new_devices))
 
 
-class AladdinDevice(CoverDevice):
+class AladdinCoverEntity(AladdinConnectEntity, CoverEntity):
     """Representation of Aladdin Connect cover."""
 
-    def __init__(self, acc, device):
-        """Initialize the cover."""
-        self._acc = acc
-        self._device_id = device['device_id']
-        self._number = device['door_number']
-        self._name = device['name']
-        self._status = STATES_MAP.get(device['status'])
+    _attr_device_class = CoverDeviceClass.GARAGE
+    _attr_supported_features = SUPPORTED_FEATURES
+    _attr_name = None
 
-    @property
-    def device_class(self):
-        """Define this cover as a garage door."""
-        return 'garage'
+    def __init__(self, coordinator: AladdinConnectCoordinator, door_id: str) -> None:
+        """Initialize the Aladdin Connect cover."""
+        super().__init__(coordinator, door_id)
+        self._attr_unique_id = door_id
 
-    @property
-    def supported_features(self):
-        """Flag supported features."""
-        return SUPPORTED_FEATURES
-
-    @property
-    def unique_id(self):
-        """Return a unique ID."""
-        return '{}-{}'.format(self._device_id, self._number)
-
-    @property
-    def name(self):
-        """Return the name of the garage door."""
-        return self._name
-
-    @property
-    def is_opening(self):
-        """Return if the cover is opening or not."""
-        return self._status == STATE_OPENING
-
-    @property
-    def is_closing(self):
-        """Return if the cover is closing or not."""
-        return self._status == STATE_CLOSING
-
-    @property
-    def is_closed(self):
-        """Return None if status is unknown, True if closed, else False."""
-        if self._status is None:
-            return None
-        return self._status == STATE_CLOSED
-
-    def close_cover(self, **kwargs):
-        """Issue close command to cover."""
-        self._acc.close_door(self._device_id, self._number)
-
-    def open_cover(self, **kwargs):
+    @override
+    async def async_open_cover(self, **kwargs: Any) -> None:
         """Issue open command to cover."""
-        self._acc.open_door(self._device_id, self._number)
+        try:
+            await self.client.open_door(self._device_id, self._number)
+        except aiohttp.ClientError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="open_door_failed",
+            ) from err
 
-    def update(self):
-        """Update status of cover."""
-        acc_status = self._acc.get_door_status(self._device_id, self._number)
-        self._status = STATES_MAP.get(acc_status)
+    @override
+    async def async_close_cover(self, **kwargs: Any) -> None:
+        """Issue close command to cover."""
+        try:
+            await self.client.close_door(self._device_id, self._number)
+        except aiohttp.ClientError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="close_door_failed",
+            ) from err
+
+    @property
+    @override
+    def is_closed(self) -> bool | None:
+        """Update is closed attribute."""
+        if (status := self.door.status) is None:
+            return None
+        return status == "closed"
+
+    @property
+    @override
+    def is_closing(self) -> bool | None:
+        """Update is closing attribute."""
+        return self.door.status == "closing"
+
+    @property
+    @override
+    def is_opening(self) -> bool | None:
+        """Update is opening attribute."""
+        return self.door.status == "opening"

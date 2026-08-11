@@ -1,37 +1,177 @@
-addon_install:
-  description: Install a HassIO docker addon.
-  fields:
-    addon: {description: Name of addon., example: smb_config}
-    version: {description: Optional or it will be use the latest version., example: '0.2'}
 addon_start:
-  description: Start a HassIO docker addon.
   fields:
-    addon: {description: Name of addon., example: smb_config}
+    addon:
+      required: true
+      example: core_ssh
+      selector:
+        addon:
+
+addon_restart:
+  fields:
+    addon:
+      required: true
+      example: core_ssh
+      selector:
+        addon:
+
+addon_stdin:
+  fields:
+    addon:
+      required: true
+      example: core_ssh
+      selector:
+        addon:
+
 addon_stop:
-  description: Stop a HassIO docker addon.
   fields:
-    addon: {description: Name of addon., example: smb_config}
-addon_uninstall:
-  description: Uninstall a HassIO docker addon.
+    addon:
+      required: true
+      example: core_ssh
+      selector:
+        addon:
+
+app_start:
   fields:
-    addon: {description: Name of addon., example: smb_config}
-addon_update:
-  description: Update a HassIO docker addon.
+    app:
+      required: true
+      example: core_ssh
+      selector:
+        app:
+
+app_restart:
   fields:
-    addon: {description: Name of addon., example: smb_config}
-    version: {description: Optional or it will be use the latest version., example: '0.2'}
-homeassistant_update:
-  description: Update HomeAssistant docker image.
+    app:
+      required: true
+      example: core_ssh
+      selector:
+        app:
+
+app_stdin:
   fields:
-    version: {description: Optional or it will be use the latest version., example: 0.40.1}
-host_reboot: {description: Reboot host computer.}
-host_shutdown: {description: Poweroff host computer.}
-host_update:
-  description: Update host computer.
+    app:
+      required: true
+      example: core_ssh
+      selector:
+        app:
+    input:
+      required: true
+      selector:
+        object:
+
+app_stop:
   fields:
-    version: {description: Optional or it will be use the latest version., example: '0.3'}
-supervisor_reload: {description: Reload HassIO supervisor addons/updates/configs.}
-supervisor_update:
-  description: Update HassIO supervisor.
+    app:
+      required: true
+      example: core_ssh
+      selector:
+        app:
+
+host_reboot:
+host_shutdown:
+backup_full:
   fields:
-    version: {description: Optional or it will be use the latest version., example: '0.3'}
+    name:
+      example: "Backup 1"
+      selector:
+        text:
+    password:
+      example: "password"
+      selector:
+        text:
+    compressed:
+      default: true
+      selector:
+        boolean:
+    location:
+      example: my_backup_mount
+      selector:
+        backup_location:
+    homeassistant_exclude_database:
+      default: false
+      selector:
+        boolean:
+
+backup_partial:
+  fields:
+    homeassistant:
+      selector:
+        boolean:
+    homeassistant_exclude_database:
+      default: false
+      selector:
+        boolean:
+    apps:
+      example: ["core_ssh", "core_samba", "core_mosquitto"]
+      selector:
+        object:
+    addons:
+      example: ["core_ssh", "core_samba", "core_mosquitto"]
+      selector:
+        object:
+    folders:
+      example: ["homeassistant", "share"]
+      selector:
+        object:
+    name:
+      example: "Partial backup 1"
+      selector:
+        text:
+    password:
+      example: "password"
+      selector:
+        text:
+    compressed:
+      default: true
+      selector:
+        boolean:
+    location:
+      example: my_backup_mount
+      selector:
+        backup_location:
+
+restore_full:
+  fields:
+    slug:
+      required: true
+      selector:
+        text:
+    password:
+      example: "password"
+      selector:
+        text:
+
+restore_partial:
+  fields:
+    slug:
+      required: true
+      selector:
+        text:
+    homeassistant:
+      selector:
+        boolean:
+    folders:
+      example: ["homeassistant", "share"]
+      selector:
+        object:
+    apps:
+      example: ["core_ssh", "core_samba", "core_mosquitto"]
+      selector:
+        object:
+    addons:
+      example: ["core_ssh", "core_samba", "core_mosquitto"]
+      selector:
+        object:
+    password:
+      example: "password"
+      selector:
+        text:
+
+mount_reload:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          filter:
+            integration: hassio
+            model: Home Assistant Mount

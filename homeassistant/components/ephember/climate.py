@@ -1,150 +1,164 @@
 """Support for the EPH Controls Ember themostats."""
-import logging
+
 from datetime import timedelta
+from enum import IntEnum
+import logging
+from typing import Any, override
+
+from pyephember2.pyephember2 import (
+    EphEmber,
+    ZoneMode,
+    boiler_state,
+    zone_current_temperature,
+    zone_is_hotwater,
+    zone_mode,
+    zone_name,
+    zone_target_temperature,
+)
 import voluptuous as vol
 
-from homeassistant.components.climate import ClimateDevice, PLATFORM_SCHEMA
-from homeassistant.components.climate.const import (
-    HVAC_MODE_HEAT, HVAC_MODE_HEAT_COOL, SUPPORT_AUX_HEAT,
-    SUPPORT_TARGET_TEMPERATURE, HVAC_MODE_OFF, CURRENT_HVAC_HEAT,
-    CURRENT_HVAC_IDLE)
+from homeassistant.components.climate import (
+    PLATFORM_SCHEMA as CLIMATE_PLATFORM_SCHEMA,
+    ClimateEntity,
+    ClimateEntityFeature,
+    HVACAction,
+    HVACMode,
+)
 from homeassistant.const import (
-    ATTR_TEMPERATURE, TEMP_CELSIUS, CONF_USERNAME, CONF_PASSWORD)
-import homeassistant.helpers.config_validation as cv
+    ATTR_TEMPERATURE,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+    UnitOfTemperature,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 _LOGGER = logging.getLogger(__name__)
 
 # Return cached results if last scan was less then this time ago
 SCAN_INTERVAL = timedelta(seconds=120)
 
-OPERATION_LIST = [HVAC_MODE_HEAT_COOL, HVAC_MODE_HEAT, HVAC_MODE_OFF]
+OPERATION_LIST = [HVACMode.HEAT_COOL, HVACMode.HEAT, HVACMode.OFF]
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_USERNAME): cv.string,
-    vol.Required(CONF_PASSWORD): cv.string
-})
+PLATFORM_SCHEMA = CLIMATE_PLATFORM_SCHEMA.extend(
+    {vol.Required(CONF_USERNAME): cv.string, vol.Required(CONF_PASSWORD): cv.string}
+)
 
 EPH_TO_HA_STATE = {
-    'AUTO': HVAC_MODE_HEAT_COOL,
-    'ON': HVAC_MODE_HEAT,
-    'OFF': HVAC_MODE_OFF
+    "AUTO": HVACMode.HEAT_COOL,
+    "ON": HVACMode.HEAT,
+    "OFF": HVACMode.OFF,
 }
+
+
+class EPHBoilerStates(IntEnum):
+    """Boiler states for a zone given by the api."""
+
+    FIXME = 0
+    OFF = 1
+    ON = 2
+
 
 HA_STATE_TO_EPH = {value: key for key, value in EPH_TO_HA_STATE.items()}
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
+def setup_platform(
+    hass: HomeAssistant,
+    config: ConfigType,
+    add_entities: AddEntitiesCallback,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> None:
     """Set up the ephember thermostat."""
-    from pyephember.pyephember import EphEmber
-
     username = config.get(CONF_USERNAME)
     password = config.get(CONF_PASSWORD)
 
     try:
         ember = EphEmber(username, password)
-        zones = ember.get_zones()
-        for zone in zones:
-            add_entities([EphEmberThermostat(ember, zone)])
     except RuntimeError:
-        _LOGGER.error("Cannot connect to EphEmber")
+        _LOGGER.error("Cannot login to EphEmber")
+
+    try:
+        homes = ember.get_zones()
+    except RuntimeError:
+        _LOGGER.error("Fail to get zones")
         return
 
-    return
+    add_entities(
+        EphEmberThermostat(ember, zone) for home in homes for zone in home["zones"]
+    )
 
 
-class EphEmberThermostat(ClimateDevice):
-    """Representation of a HeatmiserV3 thermostat."""
+class EphEmberThermostat(ClimateEntity):
+    """Representation of a EphEmber thermostat."""
 
-    def __init__(self, ember, zone):
+    _attr_hvac_modes = OPERATION_LIST
+    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+
+    def __init__(self, ember, zone) -> None:
         """Initialize the thermostat."""
         self._ember = ember
-        self._zone_name = zone['name']
+        self._zone_name = zone_name(zone)
         self._zone = zone
-        self._hot_water = zone['isHotWater']
+        self._attr_unique_id = zone["zoneid"]
 
-    @property
-    def supported_features(self):
-        """Return the list of supported features."""
+        # hot water = true, is immersive device without target temperature control.
+        self._hot_water = zone_is_hotwater(zone)
+
+        self._attr_name = self._zone_name
+
         if self._hot_water:
-            return SUPPORT_AUX_HEAT
-
-        return (SUPPORT_TARGET_TEMPERATURE |
-                SUPPORT_AUX_HEAT)
-
-    @property
-    def name(self):
-        """Return the name of the thermostat, if any."""
-        return self._zone_name
-
-    @property
-    def temperature_unit(self):
-        """Return the unit of measurement which this thermostat uses."""
-        return TEMP_CELSIUS
+            self._attr_target_temperature_step = None
+        else:
+            self._attr_target_temperature_step = 0.5
+            self._attr_supported_features = (
+                ClimateEntityFeature.TURN_OFF
+                | ClimateEntityFeature.TURN_ON
+                | ClimateEntityFeature.TARGET_TEMPERATURE
+            )
 
     @property
-    def current_temperature(self):
+    @override
+    def current_temperature(self) -> float | None:
         """Return the current temperature."""
-        return self._zone['currentTemperature']
+        return zone_current_temperature(self._zone)
 
     @property
-    def target_temperature(self):
+    @override
+    def target_temperature(self) -> float | None:
         """Return the temperature we try to reach."""
-        return self._zone['targetTemperature']
+        return zone_target_temperature(self._zone)
 
     @property
-    def target_temperature_step(self):
-        """Return the supported step of target temperature."""
-        if self._hot_water:
-            return None
-
-        return 1
-
-    @property
-    def hvac_action(self):
+    @override
+    def hvac_action(self) -> HVACAction:
         """Return current HVAC action."""
-        if self._zone['isCurrentlyActive']:
-            return CURRENT_HVAC_HEAT
+        if boiler_state(self._zone) == EPHBoilerStates.ON:
+            return HVACAction.HEATING
 
-        return CURRENT_HVAC_IDLE
+        return HVACAction.IDLE
 
     @property
-    def hvac_mode(self):
+    @override
+    def hvac_mode(self) -> HVACMode:
         """Return current operation ie. heat, cool, idle."""
-        from pyephember.pyephember import ZoneMode
-        mode = ZoneMode(self._zone['mode'])
+        mode = zone_mode(self._zone)
         return self.map_mode_eph_hass(mode)
 
-    @property
-    def hvac_modes(self):
-        """Return the supported operations."""
-        return OPERATION_LIST
-
-    def set_hvac_mode(self, hvac_mode):
+    @override
+    def set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set the operation mode."""
         mode = self.map_mode_hass_eph(hvac_mode)
         if mode is not None:
-            self._ember.set_mode_by_name(self._zone_name, mode)
+            self._ember.set_zone_mode(self._zone["zoneid"], mode)
         else:
             _LOGGER.error("Invalid operation mode provided %s", hvac_mode)
 
-    @property
-    def is_aux_heat(self):
-        """Return true if aux heater."""
-        return self._zone['isBoostActive']
-
-    def turn_aux_heat_on(self):
-        """Turn auxiliary heater on."""
-        self._ember.activate_boost_by_name(
-            self._zone_name, self._zone['targetTemperature'])
-
-    def turn_aux_heat_off(self):
-        """Turn auxiliary heater off."""
-        self._ember.deactivate_boost_by_name(self._zone_name)
-
-    def set_temperature(self, **kwargs):
+    @override
+    def set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperature."""
-        temperature = kwargs.get(ATTR_TEMPERATURE)
-        if temperature is None:
+        if (temperature := kwargs.get(ATTR_TEMPERATURE)) is None:
             return
 
         if self._hot_water:
@@ -156,37 +170,40 @@ class EphEmberThermostat(ClimateDevice):
         if temperature > self.max_temp or temperature < self.min_temp:
             return
 
-        self._ember.set_target_temperture_by_name(self._zone_name,
-                                                  int(temperature))
+        self._ember.set_zone_target_temperature(self._zone["zoneid"], temperature)
 
     @property
-    def min_temp(self):
+    @override
+    def min_temp(self) -> float:
         """Return the minimum temperature."""
         # Hot water temp doesn't support being changed
         if self._hot_water:
-            return self._zone['targetTemperature']
+            return zone_target_temperature(self._zone)
 
-        return 5
+        return 5.0
 
     @property
-    def max_temp(self):
+    @override
+    def max_temp(self) -> float:
         """Return the maximum temperature."""
         if self._hot_water:
-            return self._zone['targetTemperature']
+            return zone_target_temperature(self._zone)
 
-        return 35
+        return 35.0
 
-    def update(self):
+    def update(self) -> None:
         """Get the latest data."""
-        self._zone = self._ember.get_zone(self._zone_name)
+        self._ember.get_zones()
+        self._zone = self._ember.get_zone(self._zone["zoneid"])
 
     @staticmethod
     def map_mode_hass_eph(operation_mode):
-        """Map from home assistant mode to eph mode."""
-        from pyephember.pyephember import ZoneMode
+        """Map from Home Assistant mode to eph mode."""
         return getattr(ZoneMode, HA_STATE_TO_EPH.get(operation_mode), None)
 
     @staticmethod
     def map_mode_eph_hass(operation_mode):
-        """Map from eph mode to home assistant mode."""
-        return EPH_TO_HA_STATE.get(operation_mode.name, HVAC_MODE_HEAT_COOL)
+        """Map from eph mode to Home Assistant mode."""
+        if operation_mode is None:
+            return HVACMode.HEAT_COOL
+        return EPH_TO_HA_STATE.get(operation_mode.name, HVACMode.HEAT_COOL)

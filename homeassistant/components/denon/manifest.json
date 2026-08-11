@@ -1,8 +1,8 @@
 {
   "domain": "denon",
-  "name": "Denon",
-  "documentation": "https://www.home-assistant.io/components/denon",
-  "requirements": [],
-  "dependencies": [],
-  "codeowners": []
+  "name": "Denon Network Receivers",
+  "codeowners": [],
+  "documentation": "https://www.home-assistant.io/integrations/denon",
+  "iot_class": "local_polling",
+  "quality_scale": "legacy"
 }

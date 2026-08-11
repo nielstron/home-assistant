@@ -1,73 +1,41 @@
 """Support for tracking the moon phases."""
-import logging
 
-import voluptuous as vol
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from homeassistant.components.sensor import PLATFORM_SCHEMA
-from homeassistant.const import (CONF_NAME)
-import homeassistant.util.dt as dt_util
-from homeassistant.helpers.entity import Entity
-import homeassistant.helpers.config_validation as cv
-
-_LOGGER = logging.getLogger(__name__)
-
-DEFAULT_NAME = 'Moon'
-
-ICON = 'mdi:brightness-3'
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-})
+from .const import DOMAIN
+from .helpers import MOON_PHASES, moon_phase
 
 
-async def async_setup_platform(
-        hass, config, async_add_entities, discovery_info=None):
-    """Set up the Moon sensor."""
-    name = config.get(CONF_NAME)
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the platform from config_entry."""
+    async_add_entities([MoonSensorEntity(entry)], True)
 
-    async_add_entities([MoonSensor(name)], True)
 
-
-class MoonSensor(Entity):
+class MoonSensorEntity(SensorEntity):
     """Representation of a Moon sensor."""
 
-    def __init__(self, name):
-        """Initialize the sensor."""
-        self._name = name
-        self._state = None
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = list(MOON_PHASES)
+    _attr_translation_key = "phase"
 
-    @property
-    def name(self):
-        """Return the name of the device."""
-        return self._name
+    def __init__(self, entry: ConfigEntry) -> None:
+        """Initialize the moon sensor."""
+        self._attr_unique_id = entry.entry_id
+        self._attr_device_info = DeviceInfo(
+            name="Moon",
+            identifiers={(DOMAIN, entry.entry_id)},
+            entry_type=DeviceEntryType.SERVICE,
+        )
 
-    @property
-    def state(self):
-        """Return the state of the device."""
-        if self._state == 0:
-            return 'new_moon'
-        if self._state < 7:
-            return 'waxing_crescent'
-        if self._state == 7:
-            return 'first_quarter'
-        if self._state < 14:
-            return 'waxing_gibbous'
-        if self._state == 14:
-            return 'full_moon'
-        if self._state < 21:
-            return 'waning_gibbous'
-        if self._state == 21:
-            return 'last_quarter'
-        return 'waning_crescent'
-
-    @property
-    def icon(self):
-        """Icon to use in the frontend, if any."""
-        return ICON
-
-    async def async_update(self):
+    async def async_update(self) -> None:
         """Get the time and updates the states."""
-        from astral import Astral
-
-        today = dt_util.as_local(dt_util.utcnow()).date()
-        self._state = Astral().moon_phase(today)
+        self._attr_native_value = moon_phase()

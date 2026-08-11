@@ -1,103 +1,186 @@
 """Support for IKEA Tradfri sensors."""
-from datetime import timedelta
-import logging
 
-from homeassistant.core import callback
-from homeassistant.helpers.entity import Entity
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, cast, override
 
-from . import KEY_API, KEY_GATEWAY
+from pytradfri.command import Command
+from pytradfri.device import Device
 
-_LOGGER = logging.getLogger(__name__)
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,
+    SensorStateClass,
+)
+from homeassistant.const import Platform, UnitOfDensity, UnitOfRatio, UnitOfTime
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-SCAN_INTERVAL = timedelta(minutes=5)
+from .const import CONF_GATEWAY_ID, DOMAIN, LOGGER
+from .coordinator import TradfriConfigEntry, TradfriDeviceDataUpdateCoordinator
+from .entity import TradfriBaseEntity
 
 
-async def async_setup_entry(hass, config_entry, async_add_entities):
+@dataclass(frozen=True, kw_only=True)
+class TradfriSensorEntityDescription(SensorEntityDescription):
+    """Class describing Tradfri sensor entities."""
+
+    value: Callable[[Device], Any | None]
+
+
+def _get_air_quality(device: Device) -> int | None:
+    """Fetch the air quality value."""
+    assert device.air_purifier_control is not None
+    if (
+        device.air_purifier_control.air_purifiers[0].air_quality == 65535
+    ):  # The sensor returns 65535 if the fan is turned off
+        return None
+
+    return cast(int, device.air_purifier_control.air_purifiers[0].air_quality)
+
+
+def _get_filter_time_left(device: Device) -> int:
+    """Fetch the filter's remaining lifetime (in hours)."""
+    assert device.air_purifier_control is not None
+    return round(
+        cast(
+            int, device.air_purifier_control.air_purifiers[0].filter_lifetime_remaining
+        )
+        / 60
+    )
+
+
+SENSOR_DESCRIPTIONS_BATTERY: tuple[TradfriSensorEntityDescription, ...] = (
+    TradfriSensorEntityDescription(
+        key="battery_level",
+        device_class=SensorDeviceClass.BATTERY,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfRatio.PERCENTAGE,
+        value=lambda device: cast(int, device.device_info.battery_level),
+    ),
+)
+
+
+SENSOR_DESCRIPTIONS_FAN: tuple[TradfriSensorEntityDescription, ...] = (
+    TradfriSensorEntityDescription(
+        key="aqi",
+        translation_key="aqi",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfDensity.MICROGRAMS_PER_CUBIC_METER,
+        value=_get_air_quality,
+    ),
+    TradfriSensorEntityDescription(
+        key="filter_life_remaining",
+        translation_key="filter_life_remaining",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfTime.HOURS,
+        value=_get_filter_time_left,
+    ),
+)
+
+
+@callback
+def _migrate_old_unique_ids(hass: HomeAssistant, old_unique_id: str, key: str) -> None:
+    """Migrate unique IDs to the new format."""
+    ent_reg = er.async_get(hass)
+
+    entity_id = ent_reg.async_get_entity_id(Platform.SENSOR, DOMAIN, old_unique_id)
+
+    if entity_id is None:
+        return
+
+    new_unique_id = f"{old_unique_id}-{key}"
+
+    try:
+        ent_reg.async_update_entity(entity_id, new_unique_id=new_unique_id)
+    except ValueError:
+        LOGGER.warning(
+            "Skip migration of id [%s] to [%s] because it already exists",
+            old_unique_id,
+            new_unique_id,
+        )
+        return
+
+    LOGGER.debug(
+        "Migrating unique_id from [%s] to [%s]",
+        old_unique_id,
+        new_unique_id,
+    )
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: TradfriConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     """Set up a Tradfri config entry."""
-    api = hass.data[KEY_API][config_entry.entry_id]
-    gateway = hass.data[KEY_GATEWAY][config_entry.entry_id]
+    gateway_id = config_entry.data[CONF_GATEWAY_ID]
+    tradfri_data = config_entry.runtime_data
+    api = tradfri_data.api
 
-    devices_commands = await api(gateway.get_devices())
-    all_devices = await api(devices_commands)
-    devices = (dev for dev in all_devices if not dev.has_light_control and
-               not dev.has_socket_control)
-    async_add_entities(TradfriDevice(device, api) for device in devices)
+    entities: list[TradfriSensor] = []
+
+    for device_coordinator in tradfri_data.coordinator_list:
+        if (
+            not device_coordinator.device.has_light_control
+            and not device_coordinator.device.has_socket_control
+            and not device_coordinator.device.has_signal_repeater_control
+            and not device_coordinator.device.has_air_purifier_control
+        ):
+            descriptions = SENSOR_DESCRIPTIONS_BATTERY
+        elif device_coordinator.device.has_air_purifier_control:
+            descriptions = SENSOR_DESCRIPTIONS_FAN
+        else:
+            continue
+
+        for description in descriptions:
+            # Added in Home assistant 2022.3
+            _migrate_old_unique_ids(
+                hass=hass,
+                old_unique_id=f"{gateway_id}-{device_coordinator.device.id}",
+                key=description.key,
+            )
+
+            entities.append(
+                TradfriSensor(
+                    device_coordinator,
+                    api,
+                    gateway_id,
+                    description=description,
+                )
+            )
+
+    async_add_entities(entities)
 
 
-class TradfriDevice(Entity):
+class TradfriSensor(TradfriBaseEntity, SensorEntity):
     """The platform class required by Home Assistant."""
 
-    def __init__(self, device, api):
-        """Initialize the device."""
-        self._api = api
-        self._device = None
-        self._name = None
+    entity_description: TradfriSensorEntityDescription
 
-        self._refresh(device)
+    def __init__(
+        self,
+        device_coordinator: TradfriDeviceDataUpdateCoordinator,
+        api: Callable[[Command | list[Command]], Any],
+        gateway_id: str,
+        description: TradfriSensorEntityDescription,
+    ) -> None:
+        """Initialize a Tradfri sensor."""
+        super().__init__(
+            device_coordinator=device_coordinator,
+            api=api,
+            gateway_id=gateway_id,
+        )
 
-    async def async_added_to_hass(self):
-        """Start thread when added to hass."""
-        self._async_start_observe()
+        self.entity_description = description
 
-    @property
-    def should_poll(self):
-        """No polling needed for tradfri."""
-        return False
+        self._attr_unique_id = f"{self._attr_unique_id}-{description.key}"
 
-    @property
-    def name(self):
-        """Return the display name of this device."""
-        return self._name
+        self._refresh()  # Set initial state
 
-    @property
-    def unit_of_measurement(self):
-        """Return the unit_of_measurement of the device."""
-        return '%'
-
-    @property
-    def device_state_attributes(self):
-        """Return the devices' state attributes."""
-        info = self._device.device_info
-        attrs = {
-            'manufacturer': info.manufacturer,
-            'model_number': info.model_number,
-            'serial': info.serial,
-            'firmware_version': info.firmware_version,
-            'power_source': info.power_source_str,
-            'battery_level': info.battery_level
-        }
-        return attrs
-
-    @property
-    def state(self):
-        """Return the current state of the device."""
-        return self._device.device_info.battery_level
-
-    @callback
-    def _async_start_observe(self, exc=None):
-        """Start observation of light."""
-        # pylint: disable=import-error
-        from pytradfri.error import PytradfriError
-        if exc:
-            _LOGGER.warning("Observation failed for %s", self._name,
-                            exc_info=exc)
-
-        try:
-            cmd = self._device.observe(callback=self._observe_update,
-                                       err_callback=self._async_start_observe,
-                                       duration=0)
-            self.hass.async_create_task(self._api(cmd))
-        except PytradfriError as err:
-            _LOGGER.warning("Observation failed, trying again", exc_info=err)
-            self._async_start_observe()
-
-    def _refresh(self, device):
-        """Refresh the device data."""
-        self._device = device
-        self._name = device.name
-
-    def _observe_update(self, tradfri_device):
-        """Receive new state data for this device."""
-        self._refresh(tradfri_device)
-
-        self.hass.async_create_task(self.async_update_ha_state())
+    @override
+    def _refresh(self) -> None:
+        """Refresh the device."""
+        self._attr_native_value = self.entity_description.value(self.coordinator.data)

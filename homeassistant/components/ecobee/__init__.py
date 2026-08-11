@@ -1,115 +1,176 @@
-"""Support for Ecobee devices."""
-import logging
-import os
+"""Support for ecobee."""
+
 from datetime import timedelta
 
-import voluptuous as vol
+from pyecobee import (
+    ECOBEE_API_KEY,
+    ECOBEE_PASSWORD,
+    ECOBEE_REFRESH_TOKEN,
+    ECOBEE_USERNAME,
+    Ecobee,
+    EcobeeAuthFailedError,
+    EcobeeAuthMfaRequiredError,
+    EcobeeAuthUnknownError,
+    ExpiredTokenError,
+)
 
-import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers import discovery
-from homeassistant.const import CONF_API_KEY
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_API_KEY, CONF_PASSWORD, CONF_USERNAME
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryError,
+    ConfigEntryNotReady,
+)
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import Throttle
-from homeassistant.util.json import save_json
 
-_CONFIGURING = {}
-_LOGGER = logging.getLogger(__name__)
-
-CONF_HOLD_TEMP = 'hold_temp'
-
-DOMAIN = 'ecobee'
-
-ECOBEE_CONFIG_FILE = 'ecobee.conf'
+from .const import CONF_REFRESH_TOKEN, DOMAIN, LOGGER, PLATFORMS
+from .services import async_setup_services
 
 MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=180)
 
-NETWORK = None
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
-CONFIG_SCHEMA = vol.Schema({
-    DOMAIN: vol.Schema({
-        vol.Optional(CONF_API_KEY): cv.string,
-        vol.Optional(CONF_HOLD_TEMP, default=False): cv.boolean,
-    })
-}, extra=vol.ALLOW_EXTRA)
+type EcobeeConfigEntry = ConfigEntry[EcobeeData]
 
 
-def request_configuration(network, hass, config):
-    """Request configuration steps from the user."""
-    configurator = hass.components.configurator
-    if 'ecobee' in _CONFIGURING:
-        configurator.notify_errors(
-            _CONFIGURING['ecobee'], "Failed to register, please try again.")
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up the ecobee integration."""
+    async_setup_services(hass)
+    return True
 
-        return
 
-    def ecobee_configuration_callback(callback_data):
-        """Handle configuration callbacks."""
-        network.request_tokens()
-        network.update()
-        setup_ecobee(hass, network, config)
+async def async_setup_entry(hass: HomeAssistant, entry: EcobeeConfigEntry) -> bool:
+    """Set up ecobee via a config entry."""
+    api_key = entry.data.get(CONF_API_KEY)
+    username = entry.data.get(CONF_USERNAME)
+    password = entry.data.get(CONF_PASSWORD)
+    refresh_token = entry.data[CONF_REFRESH_TOKEN]
 
-    _CONFIGURING['ecobee'] = configurator.request_config(
-        "Ecobee", ecobee_configuration_callback,
-        description=(
-            'Please authorize this app at https://www.ecobee.com/consumer'
-            'portal/index.html with pin code: ' + network.pin),
-        description_image="/static/images/config_ecobee_thermostat.png",
-        submit_caption="I have authorized the app."
+    runtime_data = EcobeeData(
+        hass,
+        entry,
+        api_key=api_key,
+        username=username,
+        password=password,
+        refresh_token=refresh_token,
     )
 
+    if not await runtime_data.refresh():
+        raise ConfigEntryNotReady(
+            translation_domain=DOMAIN,
+            translation_key="failed_to_refresh_tokens",
+        )
 
-def setup_ecobee(hass, network, config):
-    """Set up the Ecobee thermostat."""
-    # If ecobee has a PIN then it needs to be configured.
-    if network.pin is not None:
-        request_configuration(network, hass, config)
-        return
+    await runtime_data.update()
 
-    if 'ecobee' in _CONFIGURING:
-        configurator = hass.components.configurator
-        configurator.request_done(_CONFIGURING.pop('ecobee'))
+    if runtime_data.ecobee.thermostats is None:
+        LOGGER.error("No ecobee devices found to set up")
+        return False
 
-    hold_temp = config[DOMAIN].get(CONF_HOLD_TEMP)
+    entry.runtime_data = runtime_data
 
-    discovery.load_platform(
-        hass, 'climate', DOMAIN, {'hold_temp': hold_temp}, config)
-    discovery.load_platform(hass, 'sensor', DOMAIN, {}, config)
-    discovery.load_platform(hass, 'binary_sensor', DOMAIN, {}, config)
-    discovery.load_platform(hass, 'weather', DOMAIN, {}, config)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    return True
 
 
 class EcobeeData:
-    """Get the latest data and update the states."""
+    """Handle getting the latest data from ecobee.com so platforms can use it.
 
-    def __init__(self, config_file):
-        """Init the Ecobee data object."""
-        from pyecobee import Ecobee
-        self.ecobee = Ecobee(config_file)
+    Also handle refreshing tokens and updating config entry with refreshed tokens.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        api_key: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        refresh_token: str | None = None,
+    ) -> None:
+        """Initialize the Ecobee data object."""
+        self._hass = hass
+        self.entry = entry
+
+        if api_key:
+            self.ecobee = Ecobee(
+                config={ECOBEE_API_KEY: api_key, ECOBEE_REFRESH_TOKEN: refresh_token}
+            )
+        elif username and password:
+            self.ecobee = Ecobee(
+                config={
+                    ECOBEE_USERNAME: username,
+                    ECOBEE_PASSWORD: password,
+                    ECOBEE_REFRESH_TOKEN: refresh_token,
+                }
+            )
+        else:
+            raise ValueError("No ecobee credentials provided")
 
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
-    def update(self):
-        """Get the latest data from pyecobee."""
-        self.ecobee.update()
-        _LOGGER.info("Ecobee data updated successfully")
+    async def update(self):
+        """Get the latest data from ecobee.com."""
+        try:
+            await self._hass.async_add_executor_job(self.ecobee.update)
+            LOGGER.debug("Updating ecobee")
+        except ExpiredTokenError:
+            LOGGER.debug("Refreshing expired ecobee tokens")
+            await self.refresh()
+
+    async def refresh(self) -> bool:
+        """Refresh ecobee tokens and update config entry."""
+        LOGGER.debug("Refreshing ecobee tokens and updating config entry")
+        try:
+            success = await self._hass.async_add_executor_job(
+                self.ecobee.refresh_tokens
+            )
+        except EcobeeAuthMfaRequiredError as err:
+            raise ConfigEntryAuthFailed(
+                translation_domain=DOMAIN,
+                translation_key="mfa_reauthentication_needed",
+            ) from err
+        except EcobeeAuthFailedError as err:
+            if self.ecobee.config.get(ECOBEE_USERNAME):
+                raise ConfigEntryAuthFailed(
+                    translation_domain=DOMAIN,
+                    translation_key="credentials_rejected",
+                ) from err
+            raise ConfigEntryError(
+                translation_domain=DOMAIN,
+                translation_key="credentials_rejected",
+            ) from err
+        except EcobeeAuthUnknownError:
+            LOGGER.exception("Unexpected error refreshing ecobee tokens")
+            return False
+
+        if success:
+            data = {}
+            if self.ecobee.config.get(ECOBEE_API_KEY):
+                data = {
+                    CONF_API_KEY: self.ecobee.config[ECOBEE_API_KEY],
+                    CONF_REFRESH_TOKEN: self.ecobee.config[ECOBEE_REFRESH_TOKEN],
+                }
+            elif self.ecobee.config.get(ECOBEE_USERNAME) and self.ecobee.config.get(
+                ECOBEE_PASSWORD
+            ):
+                data = {
+                    CONF_USERNAME: self.ecobee.config[ECOBEE_USERNAME],
+                    CONF_PASSWORD: self.ecobee.config[ECOBEE_PASSWORD],
+                    CONF_REFRESH_TOKEN: self.ecobee.config[ECOBEE_REFRESH_TOKEN],
+                }
+            self._hass.config_entries.async_update_entry(
+                self.entry,
+                data=data,
+            )
+            return True
+        LOGGER.error("Error refreshing ecobee tokens")
+        return False
 
 
-def setup(hass, config):
-    """Set up the Ecobee.
-
-    Will automatically load thermostat and sensor components to support
-    devices discovered on the network.
-    """
-    global NETWORK
-
-    if 'ecobee' in _CONFIGURING:
-        return
-
-    # Create ecobee.conf if it doesn't exist
-    if not os.path.isfile(hass.config.path(ECOBEE_CONFIG_FILE)):
-        jsonconfig = {"API_KEY": config[DOMAIN].get(CONF_API_KEY)}
-        save_json(hass.config.path(ECOBEE_CONFIG_FILE), jsonconfig)
-
-    NETWORK = EcobeeData(hass.config.path(ECOBEE_CONFIG_FILE))
-
-    setup_ecobee(hass, NETWORK.ecobee, config)
-
-    return True
+async def async_unload_entry(hass: HomeAssistant, entry: EcobeeConfigEntry) -> bool:
+    """Unload the config entry and platforms."""
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

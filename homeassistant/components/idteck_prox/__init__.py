@@ -1,28 +1,46 @@
 """Component for interfacing RFK101 proximity card readers."""
+
 import logging
 
+from rfk101py.rfk101py import rfk101py
 import voluptuous as vol
 
-import homeassistant.helpers.config_validation as cv
 from homeassistant.const import (
-    CONF_HOST, CONF_PORT, CONF_NAME, EVENT_HOMEASSISTANT_STOP)
+    CONF_HOST,
+    CONF_NAME,
+    CONF_PORT,
+    EVENT_HOMEASSISTANT_STOP,
+)
+from homeassistant.core import Event, HomeAssistant
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.typing import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "idteck_prox"
 
-EVENT_IDTECK_PROX_KEYCARD = 'idteck_prox_keycard'
+EVENT_IDTECK_PROX_KEYCARD = "idteck_prox_keycard"
 
-CONFIG_SCHEMA = vol.Schema({
-    DOMAIN: vol.All(cv.ensure_list, [vol.Schema({
-        vol.Required(CONF_HOST): cv.string,
-        vol.Required(CONF_PORT): cv.port,
-        vol.Required(CONF_NAME): cv.string,
-    })])
-}, extra=vol.ALLOW_EXTRA)
+CONFIG_SCHEMA = vol.Schema(
+    {
+        DOMAIN: vol.All(
+            cv.ensure_list,
+            [
+                vol.Schema(
+                    {
+                        vol.Required(CONF_HOST): cv.string,
+                        vol.Required(CONF_PORT): cv.port,
+                        vol.Required(CONF_NAME): cv.string,
+                    }
+                )
+            ],
+        )
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 
 
-def setup(hass, config):
+def setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the IDTECK proximity card component."""
     conf = config[DOMAIN]
     for unit in conf:
@@ -41,7 +59,7 @@ def setup(hass, config):
     return True
 
 
-class IdteckReader():
+class IdteckReader:
     """Representation of an IDTECK proximity card reader."""
 
     def __init__(self, hass, host, port, name):
@@ -54,15 +72,16 @@ class IdteckReader():
 
     def connect(self):
         """Connect to the reader."""
-        from rfk101py.rfk101py import rfk101py
+
         self._connection = rfk101py(self._host, self._port, self._callback)
 
     def _callback(self, card):
-        """Send a keycard event message into HASS whenever a card is read."""
+        """Send a keycard event message into Home Assistant whenever a card is read."""
         self.hass.bus.fire(
-            EVENT_IDTECK_PROX_KEYCARD, {'card': card, 'name': self._name})
+            EVENT_IDTECK_PROX_KEYCARD, {"card": card, "name": self._name}
+        )
 
-    def stop(self):
+    def stop(self, _: Event) -> None:
         """Close resources."""
         if self._connection:
             self._connection.close()

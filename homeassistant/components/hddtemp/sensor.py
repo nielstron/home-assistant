@@ -1,38 +1,58 @@
 """Support for getting the disk temperature of a host."""
-import logging
-from datetime import timedelta
-from telnetlib import Telnet
-import socket
 
+from datetime import timedelta
+import logging
+import socket
+from typing import Any, override
+
+from telnetlib import Telnet  # pylint: disable=deprecated-module
 import voluptuous as vol
 
-import homeassistant.helpers.config_validation as cv
-from homeassistant.components.sensor import PLATFORM_SCHEMA
+from homeassistant.components.sensor import (
+    PLATFORM_SCHEMA as SENSOR_PLATFORM_SCHEMA,
+    SensorDeviceClass,
+    SensorEntity,
+)
 from homeassistant.const import (
-    CONF_NAME, CONF_HOST, CONF_PORT, TEMP_CELSIUS, TEMP_FAHRENHEIT, CONF_DISKS)
-from homeassistant.helpers.entity import Entity
+    ATTR_MODEL,
+    CONF_DISKS,
+    CONF_HOST,
+    CONF_NAME,
+    CONF_PORT,
+    UnitOfTemperature,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 _LOGGER = logging.getLogger(__name__)
 
-ATTR_DEVICE = 'device'
-ATTR_MODEL = 'model'
+ATTR_DEVICE = "device"
 
-DEFAULT_HOST = 'localhost'
+DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 7634
-DEFAULT_NAME = 'HD Temperature'
+DEFAULT_NAME = "HD Temperature"
 DEFAULT_TIMEOUT = 5
 
 SCAN_INTERVAL = timedelta(minutes=1)
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Optional(CONF_DISKS, default=[]): vol.All(cv.ensure_list, [cv.string]),
-    vol.Optional(CONF_HOST, default=DEFAULT_HOST): cv.string,
-    vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
-    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-})
+PLATFORM_SCHEMA = SENSOR_PLATFORM_SCHEMA.extend(
+    {
+        vol.Optional(CONF_DISKS, default=[]): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(CONF_HOST, default=DEFAULT_HOST): cv.string,
+        vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
+        vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+    }
+)
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
+def setup_platform(
+    hass: HomeAssistant,
+    config: ConfigType,
+    add_entities: AddEntitiesCallback,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> None:
     """Set up the HDDTemp sensor."""
     name = config.get(CONF_NAME)
     host = config.get(CONF_HOST)
@@ -43,64 +63,44 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     hddtemp.update()
 
     if not disks:
-        disks = [next(iter(hddtemp.data)).split('|')[0]]
+        disks = [next(iter(hddtemp.data)).split("|")[0]]
 
-    dev = []
-    for disk in disks:
-        dev.append(HddTempSensor(name, disk, hddtemp))
-
-    add_entities(dev, True)
+    add_entities((HddTempSensor(name, disk, hddtemp) for disk in disks), True)
 
 
-class HddTempSensor(Entity):
+class HddTempSensor(SensorEntity):
     """Representation of a HDDTemp sensor."""
+
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
 
     def __init__(self, name, disk, hddtemp):
         """Initialize a HDDTemp sensor."""
         self.hddtemp = hddtemp
         self.disk = disk
-        self._name = '{} {}'.format(name, disk)
-        self._state = None
+        self._attr_name = f"{name} {disk}"
         self._details = None
-        self._unit = None
 
     @property
-    def name(self):
-        """Return the name of the sensor."""
-        return self._name
-
-    @property
-    def state(self):
-        """Return the state of the device."""
-        return self._state
-
-    @property
-    def unit_of_measurement(self):
-        """Return the unit the value is expressed in."""
-        return self._unit
-
-    @property
-    def device_state_attributes(self):
+    @override
+    def extra_state_attributes(self) -> dict[str, Any] | None:
         """Return the state attributes of the sensor."""
         if self._details is not None:
-            return {
-                ATTR_DEVICE: self._details[0],
-                ATTR_MODEL: self._details[1],
-                }
+            return {ATTR_DEVICE: self._details[0], ATTR_MODEL: self._details[1]}
+        return None
 
-    def update(self):
+    def update(self) -> None:
         """Get the latest data from HDDTemp daemon and updates the state."""
         self.hddtemp.update()
 
         if self.hddtemp.data and self.disk in self.hddtemp.data:
-            self._details = self.hddtemp.data[self.disk].split('|')
-            self._state = self._details[2]
-            if self._details is not None and self._details[3] == 'F':
-                self._unit = TEMP_FAHRENHEIT
+            self._details = self.hddtemp.data[self.disk].split("|")
+            self._attr_native_value = self._details[2]
+            if self._details is not None and self._details[3] == "F":
+                self._attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
             else:
-                self._unit = TEMP_CELSIUS
+                self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
         else:
-            self._state = None
+            self._attr_native_value = None
 
 
 class HddTempData:
@@ -115,15 +115,17 @@ class HddTempData:
     def update(self):
         """Get the latest data from HDDTemp running as daemon."""
         try:
-            connection = Telnet(
-                host=self.host, port=self.port, timeout=DEFAULT_TIMEOUT)
-            data = connection.read_all().decode(
-                'ascii').lstrip('|').rstrip('|').split('||')
-            self.data = {data[i].split('|')[0]: data[i]
-                         for i in range(0, len(data), 1)}
+            connection = Telnet(host=self.host, port=self.port, timeout=DEFAULT_TIMEOUT)
+            data = (
+                connection.read_all()
+                .decode("ascii")
+                .lstrip("|")
+                .rstrip("|")
+                .split("||")
+            )
+            self.data = {data[i].split("|")[0]: data[i] for i in range(0, len(data), 1)}
         except ConnectionRefusedError:
-            _LOGGER.error("HDDTemp is not available at %s:%s",
-                          self.host, self.port)
+            _LOGGER.error("HDDTemp is not available at %s:%s", self.host, self.port)
             self.data = None
         except socket.gaierror:
             _LOGGER.error("HDDTemp host not found %s:%s", self.host, self.port)

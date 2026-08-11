@@ -1,44 +1,85 @@
 """Support for command line notification services."""
+
 import logging
 import subprocess
+from typing import Any, override
 
-import voluptuous as vol
+from homeassistant.components.notify import (
+    DOMAIN as NOTIFY_DOMAIN,
+    BaseNotificationService,
+)
+from homeassistant.const import CONF_COMMAND
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+from homeassistant.util.process import kill_subprocess
 
-from homeassistant.const import CONF_COMMAND, CONF_NAME
-import homeassistant.helpers.config_validation as cv
-
-from homeassistant.components.notify import (PLATFORM_SCHEMA,
-                                             BaseNotificationService)
+from .const import CONF_COMMAND_TIMEOUT, DOMAIN, LOGGER
+from .utils import create_platform_yaml_not_supported_issue, render_template_args
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_COMMAND): cv.string,
-    vol.Optional(CONF_NAME): cv.string,
-})
 
-
-def get_service(hass, config, discovery_info=None):
+async def async_get_service(
+    hass: HomeAssistant,
+    config: ConfigType,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> CommandLineNotificationService | None:
     """Get the Command Line notification service."""
-    command = config[CONF_COMMAND]
+    if not discovery_info:
+        create_platform_yaml_not_supported_issue(hass, NOTIFY_DOMAIN)
+        return None
 
-    return CommandLineNotificationService(command)
+    notify_config = discovery_info
+    command: str = notify_config[CONF_COMMAND]
+    timeout: int = notify_config[CONF_COMMAND_TIMEOUT]
+
+    return CommandLineNotificationService(command, timeout)
 
 
 class CommandLineNotificationService(BaseNotificationService):
     """Implement the notification service for the Command Line service."""
 
-    def __init__(self, command):
+    def __init__(self, command: str, timeout: int) -> None:
         """Initialize the service."""
         self.command = command
+        self._timeout = timeout
 
-    def send_message(self, message="", **kwargs):
+    @override
+    def send_message(self, message: str = "", **kwargs: Any) -> None:
         """Send a message to a command line."""
-        try:
-            proc = subprocess.Popen(self.command, universal_newlines=True,
-                                    stdin=subprocess.PIPE, shell=True)
-            proc.communicate(input=message)
-            if proc.returncode != 0:
-                _LOGGER.error("Command failed: %s", self.command)
-        except subprocess.SubprocessError:
-            _LOGGER.error("Error trying to exec Command: %s", self.command)
+        if not (command := render_template_args(self.hass, self.command)):
+            return
+
+        LOGGER.debug("Running with message: %s", message)
+
+        with subprocess.Popen(  # noqa: S602 # shell by design
+            command,
+            universal_newlines=True,
+            stdin=subprocess.PIPE,
+            close_fds=False,  # required for posix_spawn
+            shell=True,
+        ) as proc:
+            try:
+                proc.communicate(input=message, timeout=self._timeout)
+                if proc.returncode != 0:
+                    _LOGGER.error(
+                        "Command failed (with return code %s): %s",
+                        proc.returncode,
+                        command,
+                    )
+            except subprocess.TimeoutExpired as err:
+                _LOGGER.debug("Timeout for command: %s", command)
+                kill_subprocess(proc)
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="timeout_error",
+                    translation_placeholders={"command": command},
+                ) from err
+            except subprocess.SubprocessError as err:
+                _LOGGER.debug("Error trying to exec command: %s", command)
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="command_error",
+                    translation_placeholders={"command": command, "error": str(err)},
+                ) from err

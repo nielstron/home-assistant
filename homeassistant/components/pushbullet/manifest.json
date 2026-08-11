@@ -1,10 +1,11 @@
 {
   "domain": "pushbullet",
   "name": "Pushbullet",
-  "documentation": "https://www.home-assistant.io/components/pushbullet",
-  "requirements": [
-    "pushbullet.py==0.11.0"
-  ],
-  "dependencies": [],
-  "codeowners": []
+  "codeowners": ["@engrbm87"],
+  "config_flow": true,
+  "documentation": "https://www.home-assistant.io/integrations/pushbullet",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "loggers": ["pushbullet"],
+  "requirements": ["pushbullet.py==0.11.0"]
 }

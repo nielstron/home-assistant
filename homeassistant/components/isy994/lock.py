@@ -1,104 +1,124 @@
-"""Support for ISY994 locks."""
-import logging
-from typing import Callable
+"""Support for ISY locks."""
 
-from homeassistant.components.lock import DOMAIN, LockDevice
-from homeassistant.const import STATE_LOCKED, STATE_UNKNOWN, STATE_UNLOCKED
-from homeassistant.helpers.typing import ConfigType
+from typing import Any, override
 
-from . import ISY994_NODES, ISY994_PROGRAMS, ISYDevice
+from pyisy.constants import ISY_VALUE_UNKNOWN
 
-_LOGGER = logging.getLogger(__name__)
+from homeassistant.components.lock import LockEntity
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.entity_platform import (
+    AddConfigEntryEntitiesCallback,
+    async_get_current_platform,
+)
 
-VALUE_TO_STATE = {
-    0: STATE_UNLOCKED,
-    100: STATE_LOCKED,
-}
+from .entity import ISYNodeEntity, ISYProgramEntity
+from .models import IsyConfigEntry
+from .services import (
+    SERVICE_DELETE_USER_CODE_SCHEMA,
+    SERVICE_DELETE_ZWAVE_LOCK_USER_CODE,
+    SERVICE_SET_USER_CODE_SCHEMA,
+    SERVICE_SET_ZWAVE_LOCK_USER_CODE,
+)
 
-
-def setup_platform(hass, config: ConfigType,
-                   add_entities: Callable[[list], None], discovery_info=None):
-    """Set up the ISY994 lock platform."""
-    devices = []
-    for node in hass.data[ISY994_NODES][DOMAIN]:
-        devices.append(ISYLockDevice(node))
-
-    for name, status, actions in hass.data[ISY994_PROGRAMS][DOMAIN]:
-        devices.append(ISYLockProgram(name, status, actions))
-
-    add_entities(devices)
+VALUE_TO_STATE = {0: False, 100: True}
 
 
-class ISYLockDevice(ISYDevice, LockDevice):
-    """Representation of an ISY994 lock device."""
+@callback
+def async_setup_lock_services(hass: HomeAssistant) -> None:
+    """Create lock-specific services for the ISY Integration."""
+    platform = async_get_current_platform()
 
-    def __init__(self, node) -> None:
-        """Initialize the ISY994 lock device."""
-        super().__init__(node)
-        self._conn = node.parent.parent.conn
+    platform.async_register_entity_service(
+        SERVICE_SET_ZWAVE_LOCK_USER_CODE,
+        SERVICE_SET_USER_CODE_SCHEMA,
+        "async_set_zwave_lock_user_code",
+    )
+    platform.async_register_entity_service(
+        SERVICE_DELETE_ZWAVE_LOCK_USER_CODE,
+        SERVICE_DELETE_USER_CODE_SCHEMA,
+        "async_delete_zwave_lock_user_code",
+    )
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: IsyConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the ISY lock platform."""
+    isy_data = entry.runtime_data
+    devices = isy_data.devices
+    entities: list[ISYLockEntity | ISYLockProgramEntity] = [
+        ISYLockEntity(node, devices.get(node.primary_node))
+        for node in isy_data.nodes[Platform.LOCK]
+    ]
+
+    entities.extend(
+        ISYLockProgramEntity(name, status, actions)
+        for name, status, actions in isy_data.programs[Platform.LOCK]
+    )
+
+    async_add_entities(entities)
+    async_setup_lock_services(hass)
+
+
+class ISYLockEntity(ISYNodeEntity, LockEntity):
+    """Representation of an ISY lock device."""
 
     @property
-    def is_locked(self) -> bool:
+    @override
+    def is_locked(self) -> bool | None:
         """Get whether the lock is in locked state."""
-        return self.state == STATE_LOCKED
-
-    @property
-    def state(self) -> str:
-        """Get the state of the lock."""
-        if self.is_unknown():
+        if self._node.status == ISY_VALUE_UNKNOWN:
             return None
-        return VALUE_TO_STATE.get(self.value, STATE_UNKNOWN)
+        return VALUE_TO_STATE.get(self._node.status)
 
-    def lock(self, **kwargs) -> None:
-        """Send the lock command to the ISY994 device."""
-        # Hack until PyISY is updated
-        req_url = self._conn.compileURL(['nodes', self.unique_id, 'cmd',
-                                         'SECMD', '1'])
-        response = self._conn.request(req_url)
+    @override
+    async def async_lock(self, **kwargs: Any) -> None:
+        """Send the lock command to the ISY device."""
+        if not await self._node.secure_lock():
+            raise HomeAssistantError(f"Unable to lock device {self._node.address}")
 
-        if response is None:
-            _LOGGER.error('Unable to lock device')
+    @override
+    async def async_unlock(self, **kwargs: Any) -> None:
+        """Send the unlock command to the ISY device."""
+        if not await self._node.secure_unlock():
+            raise HomeAssistantError(f"Unable to unlock device {self._node.address}")
 
-        self._node.update(0.5)
+    async def async_set_zwave_lock_user_code(self, user_num: int, code: int) -> None:
+        """Set a user lock code for a Z-Wave Lock."""
+        if not await self._node.set_zwave_lock_code(user_num, code):
+            raise HomeAssistantError(
+                f"Could not set user code {user_num} for {self._node.address}"
+            )
 
-    def unlock(self, **kwargs) -> None:
-        """Send the unlock command to the ISY994 device."""
-        # Hack until PyISY is updated
-        req_url = self._conn.compileURL(['nodes', self.unique_id, 'cmd',
-                                         'SECMD', '0'])
-        response = self._conn.request(req_url)
-
-        if response is None:
-            _LOGGER.error('Unable to lock device')
-
-        self._node.update(0.5)
+    async def async_delete_zwave_lock_user_code(self, user_num: int) -> None:
+        """Delete a user lock code for a Z-Wave Lock."""
+        if not await self._node.delete_zwave_lock_code(user_num):
+            raise HomeAssistantError(
+                f"Could not delete user code {user_num} for {self._node.address}"
+            )
 
 
-class ISYLockProgram(ISYLockDevice):
+class ISYLockProgramEntity(ISYProgramEntity, LockEntity):
     """Representation of a ISY lock program."""
 
-    def __init__(self, name: str, node, actions) -> None:
-        """Initialize the lock."""
-        super().__init__(node)
-        self._name = name
-        self._actions = actions
-
     @property
+    @override
     def is_locked(self) -> bool:
         """Return true if the device is locked."""
-        return bool(self.value)
+        return bool(self._node.status)
 
-    @property
-    def state(self) -> str:
-        """Return the state of the lock."""
-        return STATE_LOCKED if self.is_locked else STATE_UNLOCKED
-
-    def lock(self, **kwargs) -> None:
+    @override
+    async def async_lock(self, **kwargs: Any) -> None:
         """Lock the device."""
-        if not self._actions.runThen():
-            _LOGGER.error("Unable to lock device")
+        if not await self._actions.run_then():
+            raise HomeAssistantError(f"Unable to lock device {self._node.address}")
 
-    def unlock(self, **kwargs) -> None:
+    @override
+    async def async_unlock(self, **kwargs: Any) -> None:
         """Unlock the device."""
-        if not self._actions.runElse():
-            _LOGGER.error("Unable to unlock device")
+        if not await self._actions.run_else():
+            raise HomeAssistantError(f"Unable to unlock device {self._node.address}")

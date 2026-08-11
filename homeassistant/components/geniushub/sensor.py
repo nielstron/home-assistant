@@ -1,159 +1,121 @@
 """Support for Genius Hub sensor devices."""
+
 from datetime import timedelta
-import logging
+from typing import Any, override
 
-from homeassistant.const import DEVICE_CLASS_BATTERY
-from homeassistant.core import callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity import Entity
-from homeassistant.util.dt import utc_from_timestamp, utcnow
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.const import PERCENTAGE
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import dt as dt_util
 
-from . import DOMAIN
+from . import GeniusHubConfigEntry
+from .entity import GeniusDevice, GeniusEntity
 
-_LOGGER = logging.getLogger(__name__)
-
-GH_HAS_BATTERY = [
-    'Room Thermostat', 'Genius Valve', 'Room Sensor', 'Radiator Valve']
+GH_STATE_ATTR = "batteryLevel"
 
 GH_LEVEL_MAPPING = {
-    'error': 'Errors',
-    'warning': 'Warnings',
-    'information': 'Information'
+    "error": "Errors",
+    "warning": "Warnings",
+    "information": "Information",
 }
 
 
-async def async_setup_platform(hass, config, async_add_entities,
-                               discovery_info=None):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: GeniusHubConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
     """Set up the Genius Hub sensor entities."""
-    client = hass.data[DOMAIN]['client']
 
-    sensors = [GeniusDevice(client, d)
-               for d in client.hub.device_objs if d.type in GH_HAS_BATTERY]
+    broker = entry.runtime_data
 
-    issues = [GeniusIssue(client, i)
-              for i in list(GH_LEVEL_MAPPING)]
+    entities: list[GeniusBattery | GeniusIssue] = [
+        GeniusBattery(broker, d, GH_STATE_ATTR)
+        for d in broker.client.device_objs
+        if GH_STATE_ATTR in d.data["state"]
+    ]
+    entities.extend([GeniusIssue(broker, i) for i in list(GH_LEVEL_MAPPING)])
 
-    async_add_entities(sensors + issues, update_before_add=True)
+    async_add_entities(entities)
 
 
-class GeniusDevice(Entity):
+class GeniusBattery(GeniusDevice, SensorEntity):
     """Representation of a Genius Hub sensor."""
 
-    def __init__(self, client, device):
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_native_unit_of_measurement = PERCENTAGE
+
+    def __init__(self, broker, device, state_attr) -> None:
         """Initialize the sensor."""
-        self._client = client
-        self._device = device
+        super().__init__(broker, device)
 
-        self._name = '{} {}'.format(device.type, device.id)
+        self._state_attr = state_attr
 
-    async def async_added_to_hass(self):
-        """Set up a listener when this entity is added to HA."""
-        async_dispatcher_connect(self.hass, DOMAIN, self._refresh)
-
-    @callback
-    def _refresh(self):
-        self.async_schedule_update_ha_state(force_refresh=True)
+        self._attr_name = f"{device.type} {device.id}"
 
     @property
-    def name(self):
-        """Return the name of the sensor."""
-        return self._name
-
-    @property
-    def icon(self):
+    @override
+    def icon(self) -> str:
         """Return the icon of the sensor."""
-        values = self._device._info_raw['childValues']  # noqa; pylint: disable=protected-access
+        if "_state" in self._device.data:  # only for v3 API
+            interval = timedelta(
+                seconds=self._device.data["_state"].get("wakeupInterval", 30 * 60)
+            )
+            if (
+                not self._last_comms
+                or self._last_comms < dt_util.utcnow() - interval * 3
+            ):
+                return "mdi:battery-unknown"
 
-        last_comms = utc_from_timestamp(values['lastComms']['val'])
-        interval = timedelta(seconds=values['WakeUp_Interval']['val'])
-
-        if last_comms < utcnow() - interval * 3:
-            return 'mdi:battery-unknown'
-
-        battery_level = self._device.state['batteryLevel']
+        battery_level = self._device.data["state"][self._state_attr]
         if battery_level == 255:
-            return 'mdi:battery-unknown'
+            return "mdi:battery-unknown"
         if battery_level < 40:
-            return 'mdi:battery-alert'
+            return "mdi:battery-alert"
 
-        icon = 'mdi:battery'
+        icon = "mdi:battery"
         if battery_level <= 95:
-            icon += '-{}'.format(int(round(battery_level / 10 - .01)) * 10)
+            icon += f"-{round(battery_level / 10 - 0.01) * 10}"
 
         return icon
 
     @property
-    def device_class(self):
-        """Return the device class of the sensor."""
-        return DEVICE_CLASS_BATTERY
-
-    @property
-    def unit_of_measurement(self):
-        """Return the unit of measurement of the sensor."""
-        return '%'
-
-    @property
-    def should_poll(self) -> bool:
-        """Return False as the geniushub devices should not be polled."""
-        return False
-
-    @property
-    def state(self):
+    @override
+    def native_value(self) -> int:
         """Return the state of the sensor."""
-        level = self._device.state['batteryLevel']
+        level = self._device.data["state"][self._state_attr]
         return level if level != 255 else 0
 
-    @property
-    def device_state_attributes(self):
-        """Return the device state attributes."""
-        attrs = {}
-        attrs['assigned_zone'] = self._device.assignedZones[0]['name']
 
-        last_comms = self._device._info_raw['childValues']['lastComms']['val']  # noqa; pylint: disable=protected-access
-        attrs['last_comms'] = utc_from_timestamp(last_comms).isoformat()
-
-        return {**attrs}
-
-
-class GeniusIssue(Entity):
+class GeniusIssue(GeniusEntity, SensorEntity):
     """Representation of a Genius Hub sensor."""
 
-    def __init__(self, client, level):
+    def __init__(self, broker, level) -> None:
         """Initialize the sensor."""
-        self._hub = client.hub
-        self._name = GH_LEVEL_MAPPING[level]
+        super().__init__()
+
+        self._hub = broker.client
+        self._unique_id = f"{broker.hub_uid}_{GH_LEVEL_MAPPING[level]}"
+
+        self._attr_name = f"GeniusHub {GH_LEVEL_MAPPING[level]}"
         self._level = level
-        self._issues = []
-
-    async def async_added_to_hass(self):
-        """Set up a listener when this entity is added to HA."""
-        async_dispatcher_connect(self.hass, DOMAIN, self._refresh)
-
-    @callback
-    def _refresh(self):
-        self.async_schedule_update_ha_state(force_refresh=True)
+        self._issues: list = []
 
     @property
-    def name(self):
-        """Return the name of the sensor."""
-        return self._name
-
-    @property
-    def should_poll(self) -> bool:
-        """Return False as the geniushub devices should not be polled."""
-        return False
-
-    @property
-    def state(self):
+    @override
+    def native_value(self) -> int:
         """Return the number of issues."""
         return len(self._issues)
 
     @property
-    def device_state_attributes(self):
+    @override
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Return the device state attributes."""
-        return {'{}_list'.format(self._level): self._issues}
+        return {f"{self._level}_list": self._issues}
 
-    async def async_update(self):
+    async def async_update(self) -> None:
         """Process the sensor's state data."""
-        self._issues = [i['description']
-                        for i in self._hub.issues if i['level'] == self._level]
+        self._issues = [
+            i["description"] for i in self._hub.issues if i["level"] == self._level
+        ]

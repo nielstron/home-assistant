@@ -1,33 +1,48 @@
 """Support for Vera cover - curtains, rollershutters etc."""
-import logging
 
-from homeassistant.components.cover import (
-    ATTR_POSITION, ENTITY_ID_FORMAT, CoverDevice)
+from typing import Any, override
 
-from . import VERA_CONTROLLER, VERA_DEVICES, VeraDevice
+import pyvera as veraApi
 
-_LOGGER = logging.getLogger(__name__)
+from homeassistant.components.cover import ATTR_POSITION, ENTITY_ID_FORMAT, CoverEntity
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up the Vera covers."""
-    add_entities(
-        [VeraCover(device, hass.data[VERA_CONTROLLER]) for
-         device in hass.data[VERA_DEVICES]['cover']], True)
+from .common import ControllerData, VeraConfigEntry
+from .entity import VeraEntity
 
 
-class VeraCover(VeraDevice, CoverDevice):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: VeraConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the sensor config entry."""
+    controller_data = entry.runtime_data
+    async_add_entities(
+        [
+            VeraCover(device, controller_data)
+            for device in controller_data.devices[Platform.COVER]
+        ],
+        True,
+    )
+
+
+class VeraCover(VeraEntity[veraApi.VeraCurtain], CoverEntity):
     """Representation a Vera Cover."""
 
-    def __init__(self, vera_device, controller):
+    def __init__(
+        self, vera_device: veraApi.VeraCurtain, controller_data: ControllerData
+    ) -> None:
         """Initialize the Vera device."""
-        VeraDevice.__init__(self, vera_device, controller)
+        VeraEntity.__init__(self, vera_device, controller_data)
         self.entity_id = ENTITY_ID_FORMAT.format(self.vera_id)
 
     @property
-    def current_cover_position(self):
-        """
-        Return current position of cover.
+    @override
+    def current_cover_position(self) -> int:
+        """Return current position of cover.
 
         0 is closed, 100 is fully open.
         """
@@ -38,28 +53,34 @@ class VeraCover(VeraDevice, CoverDevice):
             return 100
         return position
 
-    def set_cover_position(self, **kwargs):
+    @override
+    def set_cover_position(self, **kwargs: Any) -> None:
         """Move the cover to a specific position."""
         self.vera_device.set_level(kwargs.get(ATTR_POSITION))
         self.schedule_update_ha_state()
 
     @property
-    def is_closed(self):
+    @override
+    def is_closed(self) -> bool | None:
         """Return if the cover is closed."""
         if self.current_cover_position is not None:
             return self.current_cover_position == 0
+        return None
 
-    def open_cover(self, **kwargs):
+    @override
+    def open_cover(self, **kwargs: Any) -> None:
         """Open the cover."""
         self.vera_device.open()
         self.schedule_update_ha_state()
 
-    def close_cover(self, **kwargs):
+    @override
+    def close_cover(self, **kwargs: Any) -> None:
         """Close the cover."""
         self.vera_device.close()
         self.schedule_update_ha_state()
 
-    def stop_cover(self, **kwargs):
+    @override
+    def stop_cover(self, **kwargs: Any) -> None:
         """Stop the cover."""
         self.vera_device.stop()
         self.schedule_update_ha_state()

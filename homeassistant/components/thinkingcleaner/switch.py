@@ -1,13 +1,23 @@
 """Support for ThinkingCleaner switches."""
-import time
-import logging
+
 from datetime import timedelta
+import time
+from typing import Any, override
+
+from pythinkingcleaner import Discovery, ThinkingCleaner
+import voluptuous as vol
 
 from homeassistant import util
-from homeassistant.const import (STATE_ON, STATE_OFF)
-from homeassistant.helpers.entity import ToggleEntity
-
-_LOGGER = logging.getLogger(__name__)
+from homeassistant.components.switch import (
+    PLATFORM_SCHEMA as SWITCH_PLATFORM_SCHEMA,
+    SwitchEntity,
+    SwitchEntityDescription,
+)
+from homeassistant.const import CONF_HOST, STATE_OFF, STATE_ON
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 MIN_TIME_BETWEEN_SCANS = timedelta(seconds=10)
 MIN_TIME_BETWEEN_FORCED_SCANS = timedelta(milliseconds=100)
@@ -15,19 +25,36 @@ MIN_TIME_BETWEEN_FORCED_SCANS = timedelta(milliseconds=100)
 MIN_TIME_TO_WAIT = timedelta(seconds=5)
 MIN_TIME_TO_LOCK_UPDATE = 5
 
-SWITCH_TYPES = {
-    'clean': ['Clean', None, None],
-    'dock': ['Dock', None, None],
-    'find': ['Find', None, None],
-}
+SWITCH_TYPES: tuple[SwitchEntityDescription, ...] = (
+    SwitchEntityDescription(
+        key="clean",
+        name="Clean",
+    ),
+    SwitchEntityDescription(
+        key="dock",
+        name="Dock",
+    ),
+    SwitchEntityDescription(
+        key="find",
+        name="Find",
+    ),
+)
+
+PLATFORM_SCHEMA = SWITCH_PLATFORM_SCHEMA.extend({vol.Optional(CONF_HOST): cv.string})
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
+def setup_platform(
+    hass: HomeAssistant,
+    config: ConfigType,
+    add_entities: AddEntitiesCallback,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> None:
     """Set up the ThinkingCleaner platform."""
-    from pythinkingcleaner import Discovery
-
-    discovery = Discovery()
-    devices = discovery.discover()
+    if host := config.get(CONF_HOST):
+        devices = [ThinkingCleaner(host, "unknown")]
+    else:
+        discovery = Discovery()
+        devices = discovery.discover()
 
     @util.Throttle(MIN_TIME_BETWEEN_SCANS, MIN_TIME_BETWEEN_FORCED_SCANS)
     def update_devices():
@@ -35,29 +62,34 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
         for device_object in devices:
             device_object.update()
 
-    dev = []
-    for device in devices:
-        for type_name in SWITCH_TYPES:
-            dev.append(ThinkingCleanerSwitch(
-                device, type_name, update_devices))
+    entities = [
+        ThinkingCleanerSwitch(device, update_devices, description)
+        for device in devices
+        for description in SWITCH_TYPES
+    ]
 
-    add_entities(dev)
+    add_entities(entities)
 
 
-class ThinkingCleanerSwitch(ToggleEntity):
+class ThinkingCleanerSwitch(SwitchEntity):
     """ThinkingCleaner Switch (dock, clean, find me)."""
 
-    def __init__(self, tc_object, switch_type, update_devices):
+    def __init__(
+        self, tc_object, update_devices, description: SwitchEntityDescription
+    ) -> None:
         """Initialize the ThinkingCleaner."""
-        self.type = switch_type
+        self.entity_description = description
 
         self._update_devices = update_devices
         self._tc_object = tc_object
-        self._state = \
-            self._tc_object.is_cleaning if switch_type == 'clean' else False
+        self._state = (
+            self._tc_object.is_cleaning if description.key == "clean" else False
+        )
         self.lock = False
         self.last_lock_time = None
         self.graceful_state = False
+
+        self._attr_name = f"{tc_object.name} {description.name}"
 
     def lock_update(self):
         """Lock the update since TC clean takes some time to update."""
@@ -89,38 +121,39 @@ class ThinkingCleanerSwitch(ToggleEntity):
         return True
 
     @property
-    def name(self):
-        """Return the name of the sensor."""
-        return self._tc_object.name + ' ' + SWITCH_TYPES[self.type][0]
-
-    @property
-    def is_on(self):
+    @override
+    def is_on(self) -> bool:
         """Return true if device is on."""
-        if self.type == 'clean':
-            return self.graceful_state \
-                if self.is_update_locked() else self._tc_object.is_cleaning
+        if self.entity_description.key == "clean":
+            return (
+                self.graceful_state
+                if self.is_update_locked()
+                else self._tc_object.is_cleaning
+            )
 
         return False
 
-    def turn_on(self, **kwargs):
+    @override
+    def turn_on(self, **kwargs: Any) -> None:
         """Turn the device on."""
-        if self.type == 'clean':
+        sensor_type = self.entity_description.key
+        if sensor_type == "clean":
             self.set_graceful_lock(True)
             self._tc_object.start_cleaning()
-        elif self.type == 'dock':
+        elif sensor_type == "dock":
             self._tc_object.dock()
-        elif self.type == 'find':
+        elif sensor_type == "find":
             self._tc_object.find_me()
 
-    def turn_off(self, **kwargs):
+    @override
+    def turn_off(self, **kwargs: Any) -> None:
         """Turn the device off."""
-        if self.type == 'clean':
+        if self.entity_description.key == "clean":
             self.set_graceful_lock(False)
             self._tc_object.stop_cleaning()
 
-    def update(self):
+    def update(self) -> None:
         """Update the switch state (Only for clean)."""
-        if self.type == 'clean' and not self.is_update_locked():
+        if self.entity_description.key == "clean" and not self.is_update_locked():
             self._tc_object.update()
-            self._state = STATE_ON \
-                if self._tc_object.is_cleaning else STATE_OFF
+            self._state = STATE_ON if self._tc_object.is_cleaning else STATE_OFF

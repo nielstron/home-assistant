@@ -1,42 +1,56 @@
 """Sensor for Supervisord process status."""
+
 import logging
+from typing import Any, override
 import xmlrpc.client
 
 import voluptuous as vol
 
-from homeassistant.components.sensor import PLATFORM_SCHEMA
+from homeassistant.components.sensor import (
+    PLATFORM_SCHEMA as SENSOR_PLATFORM_SCHEMA,
+    SensorEntity,
+)
 from homeassistant.const import CONF_URL
-from homeassistant.helpers.entity import Entity
-import homeassistant.helpers.config_validation as cv
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 _LOGGER = logging.getLogger(__name__)
 
-ATTR_DESCRIPTION = 'description'
-ATTR_GROUP = 'group'
+ATTR_DESCRIPTION = "description"
+ATTR_GROUP = "group"
 
-DEFAULT_URL = 'http://localhost:9001/RPC2'
+DEFAULT_URL = "http://localhost:9001/RPC2"
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Optional(CONF_URL, default=DEFAULT_URL): cv.url,
-})
+PLATFORM_SCHEMA = SENSOR_PLATFORM_SCHEMA.extend(
+    {vol.Optional(CONF_URL, default=DEFAULT_URL): cv.url}
+)
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
+def setup_platform(
+    hass: HomeAssistant,
+    config: ConfigType,
+    add_entities: AddEntitiesCallback,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> None:
     """Set up the Supervisord platform."""
-    url = config.get(CONF_URL)
+    url = config[CONF_URL]
     try:
         supervisor_server = xmlrpc.client.ServerProxy(url)
-        processes = supervisor_server.supervisor.getAllProcessInfo()
+        # See this link to explain the type ignore:
+        # http://supervisord.org/api.html#supervisor.rpcinterface.SupervisorNamespaceRPCInterface.getAllProcessInfo
+        processes: list[dict] = supervisor_server.supervisor.getAllProcessInfo()  # type: ignore[assignment]
     except ConnectionRefusedError:
         _LOGGER.error("Could not connect to Supervisord")
-        return False
+        return
 
     add_entities(
-        [SupervisorProcessSensor(info, supervisor_server)
-         for info in processes], True)
+        [SupervisorProcessSensor(info, supervisor_server) for info in processes], True
+    )
 
 
-class SupervisorProcessSensor(Entity):
+class SupervisorProcessSensor(SensorEntity):
     """Representation of a supervisor-monitored process."""
 
     def __init__(self, info, server):
@@ -46,33 +60,38 @@ class SupervisorProcessSensor(Entity):
         self._available = True
 
     @property
+    @override
     def name(self):
         """Return the name of the sensor."""
-        return self._info.get('name')
+        return self._info.get("name")
 
     @property
-    def state(self):
+    @override
+    def native_value(self):
         """Return the state of the sensor."""
-        return self._info.get('statename')
+        return self._info.get("statename")
 
     @property
-    def available(self):
+    @override
+    def available(self) -> bool:
         """Could the device be accessed during the last update call."""
         return self._available
 
     @property
-    def device_state_attributes(self):
+    @override
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes."""
         return {
-            ATTR_DESCRIPTION: self._info.get('description'),
-            ATTR_GROUP: self._info.get('group'),
+            ATTR_DESCRIPTION: self._info.get("description"),
+            ATTR_GROUP: self._info.get("group"),
         }
 
-    def update(self):
+    def update(self) -> None:
         """Update device state."""
         try:
             self._info = self._server.supervisor.getProcessInfo(
-                self._info.get('name'))
+                self._info.get("group") + ":" + self._info.get("name")
+            )
             self._available = True
         except ConnectionRefusedError:
             _LOGGER.warning("Supervisord not available")
